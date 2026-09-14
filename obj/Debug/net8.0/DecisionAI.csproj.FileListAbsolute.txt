@@ -1,0 +1,14 @@
+D:\code\csharp\DecisionAI\bin\Debug\net8.0\DecisionAI.exe
+D:\code\csharp\DecisionAI\bin\Debug\net8.0\DecisionAI.deps.json
+D:\code\csharp\DecisionAI\bin\Debug\net8.0\DecisionAI.runtimeconfig.json
+D:\code\csharp\DecisionAI\bin\Debug\net8.0\DecisionAI.dll
+D:\code\csharp\DecisionAI\bin\Debug\net8.0\DecisionAI.pdb
+D:\code\csharp\DecisionAI\obj\Debug\net8.0\DecisionAI.GeneratedMSBuildEditorConfig.editorconfig
+D:\code\csharp\DecisionAI\obj\Debug\net8.0\DecisionAI.AssemblyInfoInputs.cache
+D:\code\csharp\DecisionAI\obj\Debug\net8.0\DecisionAI.AssemblyInfo.cs
+D:\code\csharp\DecisionAI\obj\Debug\net8.0\DecisionAI.csproj.CoreCompileInputs.cache
+D:\code\csharp\DecisionAI\obj\Debug\net8.0\DecisionAI.dll
+D:\code\csharp\DecisionAI\obj\Debug\net8.0\refint\DecisionAI.dll
+D:\code\csharp\DecisionAI\obj\Debug\net8.0\DecisionAI.pdb
+D:\code\csharp\DecisionAI\obj\Debug\net8.0\DecisionAI.genruntimeconfig.cache
+D:\code\csharp\DecisionAI\obj\Debug\net8.0\ref\DecisionAI.dll
