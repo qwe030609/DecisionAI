@@ -20,7 +20,7 @@ using DecisionAI.Orchestration;
 
 namespace DecisionAI.Testing;
 
-public sealed class TestSystemOptions
+public sealed record TestSystemOptions
 {
     public bool IncludeL1Critic { get; init; } = true;
     public bool IncludeL2Rule { get; init; } = true;
@@ -31,6 +31,13 @@ public sealed class TestSystemOptions
     public IReadOnlyDictionary<string, WorkflowDefinition>? Catalog { get; init; }
     public Action<WorkflowEngine>? ExtraHandlers { get; init; }
     public Func<IEnumerable<(AgentSpec Spec, ILlm Llm)>>? Agents { get; init; }
+    public IVerifiabilityTriage? Triage { get; init; }                   // mutation switch：永遠放行的 triage
+    public IAbstentionGate? Gate { get; init; }                          // mutation switch：永不拒答
+    public IAssuranceService? Assurance { get; init; }                   // mutation switch：浮報能力層
+    public IInjectionGuard? Guard { get; init; }                         // mutation switch：不中性化證據
+    public Func<VerifierRegistry, IEnumerable<IVerifier>>? ExtraVerifiers { get; init; }
+    public Func<Claim, CaseState, (bool, double, string)?>? L3Test { get; init; }               // 換掉 ATS 模擬器
+    public Func<Experiment, CaseState, CancellationToken, Task<int>>? L4Run { get; init; }
     public int Seed { get; init; } = 12345;
 }
 
@@ -56,7 +63,7 @@ public sealed class TestSystem
         var policy = new InMemoryPolicyStore();
         var permission = o.Permission ?? new RolePermissionMatrix();
         var evidence = new InMemoryEvidenceStore(clock);
-        var guard = new InjectionGuard();
+        var guard = o.Guard ?? new InjectionGuard();
         var runner = new AgentRunner();
         var world = new AtsSimulator();
         var human = o.Human ?? ScriptedHumanGateway.AlwaysApprove();
@@ -69,8 +76,9 @@ public sealed class TestSystem
         var verifiers = new VerifierRegistry();
         if (o.IncludeL2Rule)       verifiers.Register(new RuleVerifier(evidence));
         if (o.IncludeL1Critic)     verifiers.Register(new LlmCriticVerifier(registry, runner, guard, policy));
-        if (o.IncludeL3Executable) verifiers.Register(new ExecutableTestVerifier("ats-sim", world.TestHypothesis));
-        if (o.IncludeL4Experiment) verifiers.Register(new ExperimentVerifier(evidence, (exp, _, _) => Task.FromResult(world.RunExperiment(exp))));
+        if (o.IncludeL3Executable) verifiers.Register(new ExecutableTestVerifier("sim", o.L3Test ?? world.TestHypothesis));
+        if (o.IncludeL4Experiment) verifiers.Register(new ExperimentVerifier(evidence, o.L4Run ?? ((exp, _, _) => Task.FromResult(world.RunExperiment(exp)))));
+        if (o.ExtraVerifiers is not null) foreach (var v in o.ExtraVerifiers(verifiers)) verifiers.Register(v);
 
         var engine = new WorkflowEngine();
         new StandardHandlers(registry, runner, verifiers, new SimpleEnsembler(), new TemperedBayesUpdater(),
@@ -78,8 +86,8 @@ public sealed class TestSystem
         o.ExtraHandlers?.Invoke(engine);
 
         var orchestrator = new CaseOrchestrator(policy, permission, clock, evidence, verifiers,
-            new VerifiabilityTriage(), new StrategyRouter(registry), engine,
-            new AssuranceService(new AbstentionGate()), new EvaluationService(),
+            o.Triage ?? new VerifiabilityTriage(), new StrategyRouter(registry), engine,
+            o.Assurance ?? new AssuranceService(o.Gate ?? new AbstentionGate()), new EvaluationService(),
             o.Catalog ?? WorkflowCatalog.Default());
 
         return new TestSystem

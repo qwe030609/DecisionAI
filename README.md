@@ -21,9 +21,25 @@ tests/
 依賴方向：`Host → Orchestration → Modules → Core ← Adapters`；`Testing` 只依賴上面幾個。
 
 ```
-dotnet test                              # Phase 1 完成門檻
-dotnet run --project src/DecisionAI.Host # 離線 demo（互動終端機會真的問你核准）
+dotnet test                                    # Phase 1 完成門檻
+dotnet run --project src/DecisionAI.Host       # 離線 demo（互動終端機會真的問你核准）
+dotnet run --project tools/DecisionAI.Benchmark -- out.json   # 32 案 benchmark + mutation 矩陣
 ```
+
+## Benchmark（`tools/DecisionAI.Benchmark`）
+
+32 個案例（沿用外部 router benchmark 的題目與維度編號）真的跑過 `CaseOrchestrator`，
+每案比對七項**可被推翻**的檢查，並跑 5 個 mutation switch 確認檢查有效：
+
+| Mutation | 換掉的守門件 | 受影響案例 | 抓到率 |
+|---|---|---|---|
+| M1 Triage 永遠放行 | `IVerifiabilityTriage` | 11 | 100%（由 StrategyRouter 的 fail-closed 接住） |
+| M2 拒答閘永不拒答 | `IAbstentionGate` | 11 | 100% |
+| M3 能力層浮報 | `IAssuranceService` | 32 | 100% |
+| M4 證據不中性化 | `IInjectionGuard` | 21 | 100% |
+| M5 越權 critic + 權限全開 | `IRolePermission` | 21 | 100% |
+
+結果：32/32 通過金標，其中 11 案由 Triage 在任何 LLM 呼叫之前拒答（成本 0）。
 
 ## Phase 1 落地的機制
 
