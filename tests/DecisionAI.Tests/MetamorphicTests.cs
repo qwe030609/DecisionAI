@@ -86,16 +86,32 @@ public class MR14_Canonicalization
     [Fact]
     public async Task MutationSwitch_AlwaysNewCanonicalizer_BreaksCrossCaseMemory()
     {
+        // 好的 canonicalizer：三條種子都命中 Catalog
+        var good = await TestSystem.Build().Orchestrator.RunAsync("CASE-OK14", AtsScenario.Request(), AtsScenario.Evidence());
+        Assert.Equal(3, good.State.Claims.Count(k => k.Key.IsCatalogued));
+
+        // 壞的：每一條都變成新條目，跨 case 記憶完全失效
         var sys = TestSystem.Build(new TestSystemOptions { Canonicalizer = new AlwaysNewCanonicalizer() });
         var run = await sys.Orchestrator.RunAsync("CASE-MUT14", AtsScenario.Request(), AtsScenario.Evidence());
 
-        var race = run.Journal.Events.OfType<ClaimProposed>()
-            .First(e => e.Frame.Mechanism == Mechanisms.RaceCondition).LocalId;
-        var ids = run.Journal.Events.OfType<ClaimCanonicalized>()
-            .Where(e => e.LocalId == race).Select(e => e.CatalogId).Distinct().ToList();
+        Assert.Equal(0, run.State.Claims.Count(k => k.Key.IsCatalogued));
+        Assert.All(run.Journal.Events.OfType<ClaimCanonicalized>(), e =>
+        {
+            Assert.Equal(MatchKind.New, e.Match);
+            Assert.StartsWith("DRAFT-", e.CatalogId);
+        });
+    }
 
-        Assert.True(ids.Count > 1, "壞的 canonicalizer 必須讓同一主張得到多個 id —— MR-14 因此變紅");
-        Assert.All(ids, id => Assert.StartsWith("DRAFT-", id));
+    [Fact]
+    public async Task RewordedFrame_KeepsSameDraftId_WhenNotYetInCatalog()
+    {
+        // 尚未進 Catalog 的主張也必須穩定：草稿 id 由 Mechanism|Locus 決定，不受措辭影響
+        var sys = TestSystem.Build(new TestSystemOptions { ClaimCatalog = InMemoryClaimCatalog.Seeded() });
+        var run = await sys.Orchestrator.RunAsync("CASE-DRAFT", AtsScenario.Request(), AtsScenario.Evidence());
+
+        foreach (var g in run.Journal.Events.OfType<ClaimCanonicalized>().GroupBy(e => e.LocalId))
+            Assert.Single(g.Select(x => x.CatalogId).Distinct());
+        Assert.All(run.State.Claims, k => Assert.StartsWith("DRAFT-", k.Key.Value));
     }
 }
 

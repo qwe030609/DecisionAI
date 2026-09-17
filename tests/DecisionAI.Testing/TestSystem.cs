@@ -34,6 +34,7 @@ public sealed record TestSystemOptions
     public IVerifiabilityTriage? Triage { get; init; }
     public IToolModelRouter? ToolRouter { get; init; }
     public IRoleAssigner? RoleAssigner { get; init; }
+    public bool IgnoreDegradation { get; init; }          // mutation switch：永遠宣稱完整獨立性
     public IAbstentionGate? Gate { get; init; }
     public IAssuranceService? Assurance { get; init; }
     public IInjectionGuard? Guard { get; init; }
@@ -111,7 +112,7 @@ public sealed class TestSystem
             policy, claimCatalog, permission, clock, evidence, verifiers,
             o.Triage ?? new VerifiabilityTriage(),
             o.ToolRouter ?? new ToolModelRouter(),
-            o.RoleAssigner ?? new RoleAssigner(registry),
+            WrapAssigner(o, registry),
             new StrategyRouter(registry), engine,
             o.Assurance ?? new AssuranceService(o.Gate ?? new AbstentionGate()),
             new EvaluationService(), new CatalogWriter(claimCatalog), payloads,
@@ -122,5 +123,11 @@ public sealed class TestSystem
             Orchestrator = orchestrator, Registry = registry, PolicyStore = policy, ClaimCatalog = claimCatalog,
             Engine = engine, Permission = permission, Clock = clock, World = world, Llms = llms, Human = human
         };
+    }
+
+    private static IRoleAssigner WrapAssigner(TestSystemOptions o, AgentRegistry registry)
+    {
+        var inner = o.RoleAssigner ?? new RoleAssigner(registry);
+        return o.IgnoreDegradation ? new IgnoreDegradationAssigner(inner) : inner;
     }
 }

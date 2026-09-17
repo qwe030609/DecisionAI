@@ -65,8 +65,12 @@ public sealed record ClaimFrame(string Mechanism, string Locus, string Trigger, 
     public string Identity => $"{Mechanism}|{Norm(Locus)}";
     public string FullIdentity => $"{Mechanism}|{Norm(Locus)}|{Norm(Trigger)}|{Norm(Observable)}";
 
-    /// <summary>未進 Catalog 前的決定性草稿 id：同樣的四元組永遠得到同樣的 id。</summary>
-    public string DraftId => "DRAFT-" + Hash(FullIdentity)[..8];
+    /// <summary>
+    /// 未進 Catalog 前的決定性草稿 id。刻意用 Identity（Mechanism|Locus）而不是四欄全部：
+    /// 主張的身分是「哪個機制發生在哪裡」，Trigger / Observable 是描述細節。
+    /// 用四欄算 id 會讓「換句話說」變成一條新主張——那正是 Rev1 的毛病。
+    /// </summary>
+    public string DraftId => "DRAFT-" + Hash(Identity)[..8];
 
     public static string Hash(string s)
         => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(s))).ToLowerInvariant();
