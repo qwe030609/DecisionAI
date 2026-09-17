@@ -36,6 +36,7 @@ public sealed record DecisionRequest(
     GroundTruthStatus GroundTruth = GroundTruthStatus.Agreed,
     bool Reflexive = false,               // 預測會改變系統 → 禁止方向預測
     bool Probabilistic = false,
+    SpecialistDomain? Specialist = null,          // 非 null → Tool/Model Router 轉介
     ImmutableArray<StageSpec> Stages = default,
     ImmutableArray<ActionOption> Actions = default,   // 由 UtilityOwner（人）提供；進 Journal 時以 Human 角色寫入
     RiskPolicy? RiskPolicy = null)
@@ -45,6 +46,13 @@ public sealed record DecisionRequest(
 }
 
 public enum Strategy { SingleAgent, SolverCriticVerifier, MultiDomainPipeline }
+
+/// <summary>
+/// 專業數值模型領域的登記（事實，由請求者或領域設定提供，不是 LLM 估的）。
+/// Tool/Model Router 據此把題目轉介出去，LLM 只負責翻譯與解釋。
+/// </summary>
+public sealed record SpecialistDomain(string ToolId, string WhyThisTool, string HowToRead,
+                                      string UncertaintyNotes, ImmutableArray<string> InputsRequired);
 
 /// <summary>ProblemFacts 是「事實 + 類別」。驗證器等級是附了什麼，不是估計出來的。</summary>
 public sealed record ProblemFacts(
@@ -61,5 +69,7 @@ public sealed record WorkflowPlan(
     Strategy Strategy,
     string WorkflowName,
     int SolverCount,
+    bool IncludeCritic,                  // ★ Rev2：L3+ 可用時 critic 是可選角色
     bool RequireHumanApproval,
+    DegradationLevel Degradation,        // ★ Rev2：獨立性不足時策略必須跟著降級
     ImmutableArray<string> Rationale);

@@ -17,8 +17,9 @@ public class JournalPermissionTests
     private static CaseJournal NewJournal(IRolePermission? p = null) => new("CASE-P", p ?? new RolePermissionMatrix(), new FixedClock());
 
     private static ClaimProposed Hyp(string actorRole) =>
-        new ClaimProposed("H1", ClaimKind.Hypothesis, "x", 0.8, ImmutableArray.Create("EV-001"), ImmutableArray<string>.Empty)
-        { StepId = "s", ActorId = "someone", ActorRole = actorRole };
+        (ClaimProposed)new ClaimProposed("H1", new ClaimKey("DRAFT-x"), ClaimKind.Hypothesis, AtsScenario.RaceFrame,
+            LikertBelief.Likely, ImmutableArray.Create("EV-001"), ImmutableArray<string>.Empty)
+            .By("s", "someone", actorRole);
 
     [Fact]
     public void Critic_CannotProposeClaims_StructuralGoodhartGuard()
@@ -37,9 +38,30 @@ public class JournalPermissionTests
         var j = NewJournal();
         Assert.True(j.Apply(Hyp(Actors.Solver)).Accepted);
         var v = new VerificationRecorded(new("me", VerifierLevel.L3_ExecutableTest, "H1", true, 1, "自證"))
-                { StepId = "s", ActorId = "solver-A", ActorRole = Actors.Solver };
+                .By("s", "solver-A", Actors.Solver);
         Assert.False(j.Apply(v).Accepted);
         Assert.Equal(VerifierLevel.None, j.State.BestPassedLevel());
+    }
+
+    [Fact]
+    public void ExperimentDesigner_CanNominate_ButCannotRegister()
+    {
+        var j = NewJournal();
+        var draft = new ExperimentDraft("NOM-1", "停用 X", ImmutableArray.Create("下降", "無變化"),
+            ImmutableArray.Create(new LikertVote("H1", ImmutableArray.Create(LikertBelief.Likely, LikertBelief.Unlikely))),
+            "designer-E", 0.4);
+        Assert.True(j.Apply(new ExperimentNominated(draft).By("s", "designer-E", Actors.ExperimentDesigner)).Accepted);
+
+        var lik = ImmutableDictionary<string, ImmutableArray<double>>.Empty.Add("H1", ImmutableArray.Create(0.75, 0.25));
+        var exp = new Experiment("EXP-1", "停用 X", ImmutableArray.Create("下降", "無變化"), lik,
+            ImmutableDictionary<string, ImmutableArray<LikertBelief>>.Empty, "designer-E", "designer-E",
+            Experiment.ComputeHash("停用 X", ImmutableArray.Create("下降", "無變化"), lik), "self", null);
+
+        // ★ Rev2：登記（似然定案 + hash）是確定性程式的事，designer 不得自己寫
+        var r = j.Apply(new ExperimentPreRegistered(exp).By("s", "designer-E", Actors.ExperimentDesigner));
+        Assert.False(r.Accepted);
+        Assert.Empty(j.State.Experiments);
+        Assert.Single(j.State.Nominations);
     }
 
     [Theory]
@@ -51,7 +73,7 @@ public class JournalPermissionTests
     public void NoLlmRoleAndNotEvenSystem_CanWriteUtilityMatrix(string role)
     {
         var j = NewJournal();
-        var e = new UtilityMatrixSet(AtsScenario.Request().ActionsOrEmpty, new RiskPolicy(50)) { StepId = "s", ActorId = "x", ActorRole = role };
+        var e = new UtilityMatrixSet(AtsScenario.Request().ActionsOrEmpty, new RiskPolicy(50)).By("s", "x", role);
         Assert.False(j.Apply(e).Accepted);
         Assert.Empty(j.State.Utilities);
     }
@@ -60,7 +82,7 @@ public class JournalPermissionTests
     public void Human_CanWriteUtilityMatrix()
     {
         var j = NewJournal();
-        var e = new UtilityMatrixSet(AtsScenario.Request().ActionsOrEmpty, new RiskPolicy(50)) { StepId = "s", ActorId = "owner", ActorRole = Actors.Human };
+        var e = new UtilityMatrixSet(AtsScenario.Request().ActionsOrEmpty, new RiskPolicy(50)).By("s", "owner", Actors.Human);
         Assert.True(j.Apply(e).Accepted);
         Assert.Equal(3, j.State.Utilities.Length);
     }
@@ -70,8 +92,8 @@ public class JournalPermissionTests
     {
         var j = NewJournal();
         j.ApplyOrThrow(Hyp(Actors.Solver));
-        var l1 = new VerificationRecorded(new("llm-critic:D", VerifierLevel.L1_LlmCritic, "H1", true, 0.8, "")) { StepId = "s", ActorId = "critic-D", ActorRole = Actors.Critic };
-        var l3 = new VerificationRecorded(new("llm-critic:D", VerifierLevel.L3_ExecutableTest, "H1", true, 1, "")) { StepId = "s", ActorId = "critic-D", ActorRole = Actors.Critic };
+        var l1 = new VerificationRecorded(new("llm-critic:D", VerifierLevel.L1_LlmCritic, "H1", true, 0.8, "")).By("s", "critic-D", Actors.Critic);
+        var l3 = new VerificationRecorded(new("llm-critic:D", VerifierLevel.L3_ExecutableTest, "H1", true, 1, "")).By("s", "critic-D", Actors.Critic);
         Assert.True(j.Apply(l1).Accepted);
         Assert.False(j.Apply(l3).Accepted);
         Assert.Equal(VerifierLevel.L1_LlmCritic, j.State.BestPassedLevel());

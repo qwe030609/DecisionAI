@@ -1,6 +1,7 @@
 // ============================================================================
 //  角色權限矩陣 — 在寫入邊界強制（D4）。預設 deny。
-//  critic 寫不進 Claim、任何 LLM 角色寫不進效用矩陣 / 信念 / 決策。
+//  Rev2 新增一列：experiment_designer 只能「提名」，不得寫「登記」——
+//  登記（似然數字定案 + hash）由確定性程式做，這是 D9 的體現。
 // ============================================================================
 
 using DecisionAI.Core.Domain;
@@ -12,12 +13,13 @@ public sealed class RolePermissionMatrix : IRolePermission
 {
     public bool CanWrite(string actorRole, CaseEvent e) => actorRole switch
     {
-        Actors.System or Actors.Router => e is not (ClaimProposed or ExperimentPreRegistered or UtilityMatrixSet or HumanActed),
+        Actors.System or Actors.Router =>
+            e is not (ClaimProposed or ExperimentNominated or UtilityMatrixSet or HumanActed),
 
         Actors.Solver             => e is ClaimProposed { Kind: ClaimKind.Hypothesis or ClaimKind.Forecast },
         Actors.Analyst or Actors.StageSolver => e is ClaimProposed { Kind: ClaimKind.Candidate },
         Actors.Critic             => e is VerificationRecorded { Result.Level: VerifierLevel.L1_LlmCritic },
-        Actors.ExperimentDesigner => e is ExperimentPreRegistered,
+        Actors.ExperimentDesigner => e is ExperimentNominated,        // ★ 不得寫 ExperimentPreRegistered
 
         Actors.Machine => e is VerificationRecorded { Result.Level: >= VerifierLevel.L2_Rule }
                             or ExperimentObserved
@@ -25,7 +27,7 @@ public sealed class RolePermissionMatrix : IRolePermission
                             or Noted,
 
         Actors.Human      => e is HumanActed or UtilityMatrixSet or EvidenceAdmitted { Evidence.Source: EvidenceSource.UserInput },
-        Actors.Evaluation => e is OutcomeRecorded or Noted,
+        Actors.Evaluation => e is OutcomeRecorded or CatalogEntryProposed or Noted,
         _ => false
     };
 }

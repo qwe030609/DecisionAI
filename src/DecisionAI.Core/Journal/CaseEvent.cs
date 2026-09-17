@@ -1,6 +1,7 @@
 // ============================================================================
 //  CaseEvent — append-only 事件。DecisionCase 是這串事件的投影。
 //  每個事件都帶 ActorId / ActorRole：權限矩陣在寫入邊界檢查，不在 prompt 裡約定。
+//  Rev2：主張分「提名 → 正規化」兩段；實驗分「提名 → 登記」兩段（登記由確定性程式做）。
 // ============================================================================
 
 using System.Collections.Immutable;
@@ -9,7 +10,7 @@ using DecisionAI.Core.Domain;
 
 namespace DecisionAI.Core.Journal;
 
-/// <summary>ActorRole 常數。LLM 角色（solver / critic / experiment_designer）永遠不能寫入確定性區的事件。</summary>
+/// <summary>ActorRole 常數。LLM 角色永遠不能寫入確定性區的事件。</summary>
 public static class Actors
 {
     public const string System   = "system";      // orchestrator / workflow engine / 確定性引擎
@@ -36,23 +37,34 @@ public abstract record CaseEvent
     public string ActorRole { get; init; } = "";     // 空白 → Journal 拒絕（fail-closed）
 
     /// <summary>標記來源。用 with 而不是 required，讓引擎與 handler 可以先建事件再蓋章。</summary>
-    public CaseEvent By(string stepId, string actorId, string actorRole) => this with { StepId = stepId, ActorId = actorId, ActorRole = actorRole };
+    public CaseEvent By(string stepId, string actorId, string actorRole)
+        => this with { StepId = stepId, ActorId = actorId, ActorRole = actorRole };
 }
 
 // ── Intake ──
-public sealed record CaseOpened(DecisionRequest Request, long PolicyVersion) : CaseEvent;
+public sealed record CaseOpened(DecisionRequest Request, long PolicyVersion, long ClaimCatalogVersion) : CaseEvent;
 public sealed record EvidenceAdmitted(Evidence Evidence) : CaseEvent;
 public sealed record UtilityMatrixSet(ImmutableArray<ActionOption> Actions, RiskPolicy Policy) : CaseEvent;   // 只有 Human 能寫
 
 // ── Routing ──
-public sealed record TriageDecided(bool Proceed, ReasonCode Code, string Explanation, string? Alternative, ProblemFacts Facts) : CaseEvent;
+public sealed record TriageDecided(bool Proceed, ReasonCode Code, string Explanation, ProblemFacts Facts) : CaseEvent;
+public sealed record DelegationDecided(bool Delegate, string? ToolId, string Reason) : CaseEvent;             // ★ Rev2
+public sealed record RolesAssigned(ImmutableArray<RoleSlot> Slots, IndependenceBudget Budget,
+                                   DegradationLevel Degradation, ImmutableArray<string> Rationale) : CaseEvent;  // ★ Rev2
 public sealed record PlanSet(WorkflowPlan Plan, ImmutableArray<string> StepIds) : CaseEvent;
 
 // ── Execution ──
 public sealed record AgentRunRecorded(AgentRun Run) : CaseEvent;
-public sealed record ClaimProposed(string ClaimId, ClaimKind Kind, string Statement, double StatedConfidence,
-                                   ImmutableArray<string> EvidenceFor, ImmutableArray<string> EvidenceAgainst) : CaseEvent;
-public sealed record ExperimentPreRegistered(Experiment Experiment) : CaseEvent;
+public sealed record ClaimProposed(string LocalId, ClaimKey Key, ClaimKind Kind, ClaimFrame Frame,
+                                   LikertBelief Confidence, ImmutableArray<string> EvidenceFor,
+                                   ImmutableArray<string> EvidenceAgainst) : CaseEvent;
+public sealed record ClaimRejected(string Reason, ClaimFrame Frame) : CaseEvent;                              // ★ schema 未過
+public sealed record ClaimCanonicalized(string LocalId, string CatalogId, MatchKind Match,
+                                        double MatchScore, bool WasNewEntry) : CaseEvent;                     // ★ Rev2
+public sealed record SaturationEstimated(int Singletons, int Doubletons, double EstimatedUndiscovered) : CaseEvent;  // Phase 2 才填
+public sealed record ExperimentNominated(ExperimentDraft Draft) : CaseEvent;                                  // ★ designer 只能寫這個
+public sealed record ExperimentPreRegistered(Experiment Experiment) : CaseEvent;                              // ★ 只有確定性程式能寫
+public sealed record ExperimentSkipped(string DraftId, double Evoi, string Reason) : CaseEvent;               // ★ Rev2
 public sealed record ExperimentObserved(string ExperimentId, int OutcomeIndex) : CaseEvent;
 public sealed record VerificationRecorded(VerificationResult Result) : CaseEvent;
 public sealed record BeliefUpdated(ImmutableDictionary<string, double> Posterior, string Cause) : CaseEvent;
@@ -66,6 +78,7 @@ public sealed record Noted(string Text) : CaseEvent;                            
 public sealed record Halted(string Reason, ImmutableArray<string> SkippedSteps) : CaseEvent;
 
 // ── 輸出與回填 ──
-public sealed record Abstained(ReasonCode Code, string Explanation, string? Alternative) : CaseEvent;
+public sealed record Abstained(ReasonCode Code, string Explanation, SubstitutePayload? Payload) : CaseEvent;  // ★ 型別化 payload
 public sealed record AssuranceIssued(AssuranceReport Report) : CaseEvent;
 public sealed record OutcomeRecorded(Outcome Outcome) : CaseEvent;
+public sealed record CatalogEntryProposed(string DraftId, ClaimFrame Frame, string Domain) : CaseEvent;       // ★ Evaluation 回寫候選

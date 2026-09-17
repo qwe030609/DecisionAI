@@ -19,9 +19,14 @@ public sealed record BetaPosterior(double A = 1, double B = 1)
 
 public readonly record struct WeightKey(string Agent, string Domain, string Role);
 
-public sealed record PolicySnapshot(long Version, ImmutableDictionary<WeightKey, BetaPosterior> Weights)
+/// <summary>
+/// Rev2：Catalog 版本一併凍結。否則同一個 case 執行中途 Catalog 被別人更新，
+/// canonical id 就不決定性了。
+/// </summary>
+public sealed record PolicySnapshot(long Version, ImmutableDictionary<WeightKey, BetaPosterior> Weights,
+                                    long ClaimCatalogVersion = 0)
 {
-    public static readonly PolicySnapshot Initial = new(0, ImmutableDictionary<WeightKey, BetaPosterior>.Empty);
+    public static readonly PolicySnapshot Initial = new(0, ImmutableDictionary<WeightKey, BetaPosterior>.Empty, 0);
 
     public BetaPosterior Weight(string agent, string domain, string role)
         => Weights.GetValueOrDefault(new WeightKey(agent, domain, role), BetaPosterior.Prior);
@@ -34,12 +39,12 @@ public sealed record PolicySnapshot(long Version, ImmutableDictionary<WeightKey,
             var key = new WeightKey(o.Agent, o.Domain, o.Role);
             b[key] = b.GetValueOrDefault(key, BetaPosterior.Prior).Observe(o.Success);
         }
-        return new PolicySnapshot(Version + 1, b.ToImmutable());
+        return new PolicySnapshot(Version + 1, b.ToImmutable(), delta.CatalogVersionAfter ?? ClaimCatalogVersion);
     }
 
     public string Report()
     {
-        var lines = new List<string> { $"policy v{Version}", "agent            domain/role                      mean   n" };
+        var lines = new List<string> { $"policy v{Version}（claim catalog v{ClaimCatalogVersion}）", "agent            domain/role                      mean   n" };
         foreach (var kv in Weights.OrderBy(k => k.Key.Agent).ThenBy(k => k.Key.Role))
             lines.Add($"{kv.Key.Agent,-16} {kv.Key.Domain + "/" + kv.Key.Role,-32} {kv.Value.Mean:F2}   {kv.Value.N}");
         return string.Join("\n", lines);
@@ -49,4 +54,8 @@ public sealed record PolicySnapshot(long Version, ImmutableDictionary<WeightKey,
 public sealed record WeightObservation(string Agent, string Domain, string Role, bool Success, VerifierLevel Level);
 
 /// <summary>Evaluation 的產物：只描述「觀察到什麼」，不直接寫入。</summary>
-public sealed record PolicyDelta(string CaseId, ImmutableArray<WeightObservation> Observations, ImmutableArray<string> Notes);
+public sealed record CatalogEntryCandidate(string DraftId, ClaimFrame Frame, string Domain, bool ConfirmedTrue);
+
+public sealed record PolicyDelta(string CaseId, ImmutableArray<WeightObservation> Observations,
+                                 ImmutableArray<CatalogEntryCandidate> CatalogEntries, ImmutableArray<string> Notes,
+                                 long? CatalogVersionAfter = null);

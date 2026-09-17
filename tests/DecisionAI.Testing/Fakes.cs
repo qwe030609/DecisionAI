@@ -72,26 +72,27 @@ public sealed class AtsSimulator
 {
     private readonly Random _rng = new(2026);
 
-    /// <summary>L3：對假設跑「可執行測試」——這裡是模擬器：只有 timer race 假設能被注入修復後重現/消失。</summary>
+    /// <summary>
+    /// L3：對假設跑「可執行測試」。Rev2 之後判定依據是四元組的 Mechanism，
+    /// 不再是自然語言關鍵字——這正是 ClaimFrame 帶來的好處。
+    /// </summary>
     public (bool Pass, double Score, string Note)? TestHypothesis(Claim claim, CaseState _)
     {
-        if (claim.Kind != ClaimKind.Hypothesis) return null;
-        string s = claim.Statement;
-        if (s.Contains("KeepAlive") && (s.Contains("競爭") || s.Contains("race")))
-            return (true, 0.9, "模擬器：對 KeepAliveTick 加鎖後 5000 次循環 0 次斷線；不加鎖重現 17 次");
-        if (s.Contains("生命週期") || s.Contains("回收"))
-            return (false, 0.2, "模擬器：追蹤 channel 回收時序，斷線時 channel 仍存活");
-        if (s.Contains("網路") || s.Contains("交換機"))
-            return (false, 0.1, "模擬器：注入網路瞬斷後斷線型態（PLC 側先斷）與現場不符");
-        return null;   // 其他假設：測試不適用
+        if (claim.Kind != ClaimKind.Hypothesis || claim.IsOpinion) return null;
+        return claim.Frame.Mechanism switch
+        {
+            Mechanisms.RaceCondition =>
+                (true, 0.9, "模擬器：對 KeepAliveTick 加鎖後 5000 次循環 0 次斷線；移除鎖重現 17 次"),
+            Mechanisms.LifecycleMisuse =>
+                (false, 0.2, "模擬器：追蹤 channel 回收時序，斷線瞬間 channel 仍存活"),
+            Mechanisms.EnvironmentalStress =>
+                (false, 0.1, "模擬器：注入鏈路異常後的斷線型態（對端先斷）與現場不符"),
+            _ => null   // 其他機制：這個模擬器不適用
+        };
     }
 
     public int RunExperiment(Experiment exp)
-    {
-        if (exp.Description.Contains("停用 KeepAlive")) return 0;   // 失效率大幅下降
-        if (exp.Description.Contains("thread"))         return 0;   // 觀察到重疊
-        return 1;                                                   // 其他實驗：無變化
-    }
+        => exp.Description.Contains("停用 KeepAlive") || exp.Description.Contains("thread") ? 0 : 1;
 
     public (int Cycles, int Failures) Deploy(string actionId, int cycles)
     {

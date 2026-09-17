@@ -18,7 +18,7 @@ public interface IEnsembler
 
 public sealed class SimpleEnsembler : IEnsembler
 {
-    /// <summary>樣本 &lt; 5 的 agent 自報信心一律往 0.5 收縮七折（Phase 1 對所有人都是這樣）。</summary>
+    /// <summary>Phase 1 對所有人一律往 0.5 收縮七折（沒證明自己之前不信）；校準在 Phase 2。</summary>
     public double Shrink { get; init; } = 0.7;
 
     public ImmutableDictionary<string, double> Prior(CaseState s, PolicySnapshot policy)
@@ -34,13 +34,13 @@ public sealed class SimpleEnsembler : IEnsembler
             foreach (var agent in proposers)
             {
                 var prop = h.Proposals.FirstOrDefault(p => p.AgentId == agent);
-                // 沒提這個假設的人 = 弱的反對票（p=0.15，權重減半）
-                double p = prop is null ? 0.15 : 0.5 + (prop.StatedConfidence - 0.5) * Shrink;
+                // 自報信心是定性等級，先查表成機率再收縮；沒提這個假設的人 = 弱的反對票（p=0.15，權重減半）
+                double p = prop is null ? 0.15 : 0.5 + (prop.Probability - 0.5) * Shrink;
                 p = Math.Clamp(p, 0.01, 0.99);
                 double w = policy.Weight(agent, s.Domain, "solver").Mean * (prop is null ? 0.5 : 1.0);
                 num += w * Math.Log(p / (1 - p)); den += w;
             }
-            raw[h.Id] = 1 / (1 + Math.Exp(-(den == 0 ? 0 : num / den)));
+            raw[h.LocalId] = 1 / (1 + Math.Exp(-(den == 0 ? 0 : num / den)));
         }
         double z = raw.Values.Sum();
         return raw.OrderBy(k => k.Key, StringComparer.Ordinal).ToImmutableDictionary(k => k.Key, k => k.Value / z);
