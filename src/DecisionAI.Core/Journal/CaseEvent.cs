@@ -72,7 +72,7 @@ public sealed record VerificationRecorded(VerificationResult Result) : CaseEvent
 /// <summary>似然等級整體 ±1 級後排序是否改變（MR-15）。</summary>
 public sealed record SensitivityAssessed(bool OrderChanged, string? TopBaseline, string? TopUnderShift, string Detail) : CaseEvent;
 /// <summary>假設集重抽樣後「推薦行動不變」的比例（MR-13）。</summary>
-public sealed record StabilityResampled(double StabilityRate, int Trials, string Detail) : CaseEvent;
+public sealed record StabilityResampled(double StabilityRate, int Trials, string BaselineAction, string Detail) : CaseEvent;
 /// <summary>Conformal 覆蓋層。白名單外的題型不會有這個事件。</summary>
 public sealed record CoveragePredicted(string TaskFamily, double TargetCoverage, ImmutableArray<string> PredictionSet, string Detail) : CaseEvent;
 /// <summary>多樣性監測（MR-5）。</summary>

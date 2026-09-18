@@ -16,6 +16,7 @@ Console.OutputEncoding = Encoding.UTF8;
 string outPath = args.Length > 0 ? args[0] : "benchmark-results.json";
 
 var rows = new List<object>();
+var baselines = new Dictionary<string, DecisionAI.Orchestration.CaseRun>();
 int passed = 0, abstainedCount = 0;
 
 TestSystemOptions BaseOptions(BenchCase c) => new()
@@ -41,6 +42,7 @@ foreach (var c in BenchmarkCases.All)
     var run = await sys.Orchestrator.RunAsync($"BM-{c.Id}", Request(c), c.Evidence);
     var s = run.State;
     var checks = Checks.RunAll(c, run, sys);
+    baselines[c.Id] = run;                 // mutation 的可觀察性以 baseline 實際發生什麼為準
     bool pass = checks.All(x => x.Pass);
     if (pass) passed++;
     if (run.Report.Abstention.Abstained) abstainedCount++;
@@ -50,7 +52,9 @@ foreach (var c in BenchmarkCases.All)
     var evalNotes = ImmutableArray<string>.Empty;
     if (!run.Report.Abstention.Abstained && s.Claims.Any(k => k.Kind == ClaimKind.Hypothesis) && c.HasL3)
     {
-        string trueId = $"H{c.TrueHypothesis}";
+        // 真相以「宣告清單裡的第幾條」表示；本地編號取決於指派順序，不能直接當真相
+        var trueFrame = c.Hypotheses[c.TrueHypothesis - 1].Frame;
+        string trueId = s.Claims.FirstOrDefault(k => k.Frame.Identity == trueFrame.Identity)?.LocalId ?? $"H{c.TrueHypothesis}";
         var truth = s.Claims.ToImmutableDictionary(k => k.LocalId, k => k.LocalId == trueId);
         var next = sys.Orchestrator.RecordOutcome(run.Journal, new Outcome(trueId, truth,
             VerifierLevel.L5_RealOutcome, $"部署後實測：真相為 {trueId}"));
@@ -99,8 +103,27 @@ foreach (var c in BenchmarkCases.All)
             roles = s.Roles.Select(r => new { role = r.Role, agent = r.AgentId, family = r.Family, vendor = r.Vendor }).ToArray(),
             grade = run.Report.ConservativeGrade(),
             capability = run.Report.Capability is { } cap ? new { level = cap.BestPassedLevel.ToString(), cap = cap.Cap, degraded = cap.Degraded, reasons = cap.DegradedReasons.ToArray() } : null,
-            coverage = (object?)null,
-            stability = run.Report.Stability is { } st ? new { robustness = st.Robustness, worstCase = st.WorstCase, maxRegret = st.MaxRegret } : null,
+            coverage = run.Report.Coverage is { } cv
+                ? new { target = cv.TargetCoverage, set = cv.PredictionSet.ToArray() } : null,
+            coverageNote = s.Log.FirstOrDefault(l => l.Contains("覆蓋層"))?.Trim(),
+            stability = run.Report.Stability is { } st ? new
+            {
+                robustness = st.Robustness, worstCase = st.WorstCase, maxRegret = st.MaxRegret,
+                resampling = st.DecisionStabilityUnderResampling,
+                likertShiftStable = st.PosteriorOrderStableUnderLikertShift
+            } : null,
+            likelihoodSensitive = run.Report.LikelihoodSensitive,
+            sensitivityDetail = s.SensitivityDetail,
+            resamplingDetail = run.Journal.Events.OfType<StabilityResampled>().LastOrDefault()?.Detail,
+            saturation = run.Report.HypothesisCoverage is { } sat ? new
+            {
+                singletons = sat.Singletons, doubletons = sat.Doubletons,
+                estimatedUndiscovered = sat.EstimatedUndiscovered,
+                coverage = DecisionAI.Modules.Assurance.Chao1SaturationEstimator.Coverage(s.Hypotheses.Count(), sat)
+            } : null,
+            skippedExperiments = run.Journal.Events.OfType<ExperimentSkipped>()
+                .Select(e => new { draft = e.DraftId, evoi = e.Evoi, reason = e.Reason }).ToArray(),
+            ensembleRationale = s.Log.Where(l => l.Contains("集成 ")).ToArray(),
             recommendedAction = s.Decision?.RecommendedAction,
             decisionReason = s.Decision?.Reason,
             perAction = s.Decision?.PerAction.OrderBy(k => k.Key).Select(k => new { id = k.Key, eu = k.Value.ExpectedUtility, worst = k.Value.WorstCase, regret = k.Value.MaxRegret, admissible = k.Value.Admissible }).ToArray(),
@@ -177,7 +200,7 @@ foreach (var m in Mutations.All)
         {
             checks = ImmutableArray.Create(new CheckResult("Engine", false, ex.GetType().Name + ": " + ex.Message));
         }
-        bool isAffected = m.Affected(c);
+        bool isAffected = m.Affected(c) && (m.Observable is null || m.Observable(baselines[c.Id]));
         if (isAffected) affected++;
         var bad = checks.Where(x => !x.Pass).Select(x => x.Name).ToArray();
         if (isAffected && bad.Length == 0) missed++;
@@ -195,7 +218,7 @@ foreach (var m in Mutations.All)
     mutations.Add(new
     {
         id = m.Id, name = m.Name, target = m.Target, affectedWhy = m.AffectedWhy, rev2New = m.IsRev2New,
-        notObservableHere = m.NotObservableHere,
+        notObservableHere = m.NotObservableHere, observableWhy = m.ObservableWhy,
         detected = caught.Count, affected, missed, total = BenchmarkCases.All.Length, rate,
         caughtBy = caughtBy.OrderByDescending(k => k.Value).Select(k => new { check = k.Key, n = k.Value }).ToArray(),
         cases = caught

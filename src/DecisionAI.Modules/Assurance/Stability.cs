@@ -6,6 +6,7 @@
 //  top-2 假設互換但推薦行動一樣，那就是穩健的。
 //  第二項擾動把「每次跑不一樣」從隱憂變成一個可稽核的數字；
 //  它低的時候系統應該自己說「這題我跑五次會有兩次給不同建議」，而不是假裝穩定。
+//  「可稽核」在這裡是硬要求：這個數字用列舉算而不是抽樣算，任何人都能重算出同一個值。
 // ============================================================================
 
 using System.Collections.Immutable;
@@ -24,10 +25,13 @@ public sealed record ResamplingVerdict(double StabilityRate, int Trials, string 
 public interface IDecisionStabilityAnalyzer
 {
     /// <summary>
-    /// 假設集重抽樣：對 solver 的提名做 bootstrap，重算先驗 → 後驗 → 決策，
-    /// 量「推薦行動不變」的比例。這是對「K 次獨立生成」的可執行近似——
-    /// 真正重跑模型太貴，改成重抽已經抽到的樣本，量的是同一件事：
-    /// 如果當時抽到的是另一組 solver 輸出，結論會不會變。
+    /// 假設集重抽樣：把「如果當時抽到的是另一組 solver 輸出，結論會不會變」變成一個數字。
+    ///
+    /// 做法刻意是「列舉所有非空的 solver 子集」而不是 bootstrap 抽樣：
+    /// bootstrap 在 25 次下的標準誤差高達 ±5～10 個百分點，那個數字本身比它要量的效應還糊，
+    /// 而且沒有人能重算它來推翻它。列舉是確定性的、可被獨立重算的，
+    /// 也因此是可稽核的——這比「看起來更像統計」重要。
+    /// solver 多到列舉太貴時（> MaxEnumerable）才退回抽樣。
     /// </summary>
     ResamplingVerdict Analyze(CaseState s, PolicySnapshot policy, IRandomSource rng, int trials = 25);
 }
@@ -41,6 +45,9 @@ public sealed class DecisionStabilityAnalyzer : IDecisionStabilityAnalyzer
     public DecisionStabilityAnalyzer(IEnsembler ensembler, IBayesUpdater bayes, IDecisionEngine decision)
     { _ensembler = ensembler; _bayes = bayes; _decision = decision; }
 
+    /// <summary>超過這個 solver 數就改用抽樣（2^n 個子集）。</summary>
+    public int MaxEnumerable { get; init; } = 10;
+
     public ResamplingVerdict Analyze(CaseState s, PolicySnapshot policy, IRandomSource rng, int trials = 25)
     {
         string baseline = s.Decision?.RecommendedAction ?? "";
@@ -51,17 +58,16 @@ public sealed class DecisionStabilityAnalyzer : IDecisionStabilityAnalyzer
         if (proposers.Count < 2)
             return new ResamplingVerdict(1, 0, baseline, "只有一個 solver → 沒有可重抽的樣本（Assurance 已由降級階梯反映）");
 
-        var stream = rng.Fork("claim_resampling");
+        var subsets = proposers.Count <= MaxEnumerable
+            ? Enumerate(proposers)
+            : Bootstrap(proposers, trials, rng.Fork("claim_resampling"));
+
         int same = 0, ran = 0;
         var flips = new Dictionary<string, int>();
+        var stream = rng.Fork("resampling_decision");
 
-        for (int t = 0; t < trials; t++)
+        foreach (var drawn in subsets)
         {
-            // bootstrap：對 solver 取後放回，重建這一次「抽到的」提名集合
-            var drawn = Enumerable.Range(0, proposers.Count)
-                .Select(_ => proposers[stream.Next(proposers.Count)]).ToImmutableHashSet();
-            if (drawn.Count == proposers.Count && t > 0) { /* 與原樣本相同也照算，不跳過 */ }
-
             var resampled = Resample(s, drawn);
             if (!resampled.Claims.Any(c => c.Kind == ClaimKind.Hypothesis && !c.IsOpinion)) continue;
 
@@ -78,11 +84,28 @@ public sealed class DecisionStabilityAnalyzer : IDecisionStabilityAnalyzer
         }
 
         double rate = ran == 0 ? 1 : same / (double)ran;
+        string how = proposers.Count <= MaxEnumerable ? $"{ran} 個 solver 子集" : $"{ran} 次重抽";
         string detail = ran == 0
             ? "重抽樣後沒有可用的假設 → 視為穩定"
-            : $"{ran} 次重抽中 {same} 次仍推薦 {baseline}（{rate:P0}）" +
+            : $"{how}中 {same} 個仍推薦 {baseline}（{rate:P0}）" +
               (flips.Count > 0 ? $"；改推薦：{string.Join("、", flips.OrderByDescending(k => k.Value).Select(k => $"{k.Key}×{k.Value}"))}" : "");
         return new ResamplingVerdict(rate, ran, baseline, detail);
+    }
+
+    /// <summary>所有非空子集，順序固定（可重放且可被獨立重算）。</summary>
+    private static IEnumerable<ImmutableHashSet<string>> Enumerate(List<string> proposers)
+    {
+        for (int mask = 1; mask < (1 << proposers.Count); mask++)
+            yield return Enumerable.Range(0, proposers.Count)
+                .Where(i => (mask & (1 << i)) != 0)
+                .Select(i => proposers[i]).ToImmutableHashSet();
+    }
+
+    private static IEnumerable<ImmutableHashSet<string>> Bootstrap(List<string> proposers, int trials, IRandomSource stream)
+    {
+        for (int t = 0; t < trials; t++)
+            yield return Enumerable.Range(0, proposers.Count)
+                .Select(_ => proposers[stream.Next(proposers.Count)]).ToImmutableHashSet();
     }
 
     /// <summary>只保留被抽中的 solver 的提名；主張的證據引用跟著剩下的提案走。</summary>

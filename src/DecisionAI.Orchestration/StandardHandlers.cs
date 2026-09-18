@@ -265,7 +265,7 @@ public sealed class StandardHandlers
         var v = _stability.Analyze(s, _policy.Pin(s.PolicyVersion), _rng.Fork(s.Id + ":stability"), step.PInt("trials", 25));
         return Task.FromResult<IReadOnlyList<CaseEvent>>(new[]
         {
-            Sys(step.Id, new StabilityResampled(v.StabilityRate, v.Trials, v.Detail))
+            Sys(step.Id, new StabilityResampled(v.StabilityRate, v.Trials, v.BaselineAction, v.Detail))
         });
     }
 
@@ -337,7 +337,12 @@ public sealed class StandardHandlers
         {
             var prior = _ensembler.Prior(s, _policy.Pin(s.PolicyVersion));
             if (prior.Count == 0) events.Add(Sys(step.Id, new Noted("沒有可進機率引擎的假設（全是意見或無主張）")));
-            else events.Add(Sys(step.Id, new BeliefUpdated(prior, "先驗（集成）：" + Beliefs.Render(prior))));
+            else
+            {
+                events.Add(Sys(step.Id, new BeliefUpdated(prior, "先驗（集成）：" + Beliefs.Render(prior))));
+                // 權重與相關性折扣必須可稽核：否則「加權集成」等於一句無法查核的話
+                foreach (var line in _ensembler.LastRationale) events.Add(Sys(step.Id, new Noted("  集成 " + line)));
+            }
         }
         else
         {

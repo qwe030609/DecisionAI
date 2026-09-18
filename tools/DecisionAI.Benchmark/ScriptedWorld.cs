@@ -155,15 +155,30 @@ public static class ScriptedWorld
                 ? new JsonArray(nameof(LikertBelief.AlmostCertain), nameof(LikertBelief.AlmostImpossible))
                 : new JsonArray(nameof(LikertBelief.Unlikely), nameof(LikertBelief.Likely));
 
+        // 第二個實驗刻意沒有區分力：每個假設在兩個結果下的等級都一樣。
+        // 它有成本、看起來很忙，但無論出哪個結果都不會改變推薦行動 → EVOI ≤ 0，應該被跳過。
+        // 這是 MR-16 在 benchmark 上的掛鉤點：沒有這個提名，EVOI 選擇器就沒有東西可以擋。
+        var flat = new JsonObject();
+        foreach (var id in claimIds)
+            flat[id] = new JsonArray(nameof(LikertBelief.EvenOdds), nameof(LikertBelief.EvenOdds));
+
         return new JsonObject
         {
-            ["experiments"] = new JsonArray(new JsonObject
-            {
-                ["description"] = "以受控條件重現並注入修復，比對修復前後的失效率",
-                ["outcomes"] = new JsonArray("失效率顯著下降", "無明顯變化"),
-                ["cost"] = 0.4,
-                ["votes"] = votes
-            })
+            ["experiments"] = new JsonArray(
+                new JsonObject
+                {
+                    ["description"] = "以受控條件重現並注入修復，比對修復前後的失效率",
+                    ["outcomes"] = new JsonArray("失效率顯著下降", "無明顯變化"),
+                    ["cost"] = 0.4,
+                    ["votes"] = votes
+                },
+                new JsonObject
+                {
+                    ["description"] = "再蒐集一週的同類運行紀錄並重新統計",
+                    ["outcomes"] = new JsonArray("紀錄增加", "紀錄未增加"),
+                    ["cost"] = 0.3,
+                    ["votes"] = flat
+                })
         }.ToJsonString();
     }
 
