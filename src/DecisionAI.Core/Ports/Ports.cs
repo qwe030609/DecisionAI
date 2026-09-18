@@ -49,11 +49,31 @@ public sealed record VerifierInventory(ImmutableArray<VerifierLevel> Levels)
     public bool HasRealVerifier => VerifierTrust.CountsAsVerifier(Best);
 }
 
+// ── 嵌入（Diversity 用；刻意是獨立 port，可用本地小模型，不必是 LLM）──
+public interface IEmbedder
+{
+    string Name { get; }
+    int Dimensions { get; }
+    float[] Embed(string text);
+}
+
 // ── 人 ──
 public enum HumanRole { Approver, Rater, Arbiter, UtilityOwner, Accountable }
 
-public sealed record HumanRequest(string CaseId, string StepId, HumanRole Role, string What, ImmutableArray<string> Context);
-public sealed record HumanVerdict(bool Approved, string Rationale);
+public sealed record HumanRequest(string CaseId, string StepId, HumanRole Role, string What, ImmutableArray<string> Context)
+{
+    /// <summary>系統建議：由 PresentationPolicy 決定要不要、以及在什麼順序揭示。</summary>
+    public string? SystemRecommendation { get; init; }
+    /// <summary>候選項（盲評用：模型身分已隱藏、順序已隨機化、長度已正規化）。</summary>
+    public ImmutableArray<string> Options { get; init; } = ImmutableArray<string>.Empty;
+    public bool RecommendationRevealed { get; init; }
+}
+
+public sealed record HumanVerdict(bool Approved, string Rationale)
+{
+    /// <summary>盲評時選了哪一個候選（索引）。</summary>
+    public int? ChosenOption { get; init; }
+}
 
 public interface IHumanGateway
 {

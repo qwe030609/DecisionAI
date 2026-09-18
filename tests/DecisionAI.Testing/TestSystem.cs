@@ -10,6 +10,8 @@ using DecisionAI.Modules.Agents;
 using DecisionAI.Modules.Assurance;
 using DecisionAI.Modules.Catalog;
 using DecisionAI.Modules.Decision;
+using DecisionAI.Modules.Diversity;
+using DecisionAI.Modules.Humans;
 using DecisionAI.Modules.Evaluation;
 using DecisionAI.Modules.Evidence;
 using DecisionAI.Modules.Journal;
@@ -41,6 +43,18 @@ public sealed record TestSystemOptions
     public IClaimCanonicalizer? Canonicalizer { get; init; }
     public IPreRegistrationGuard? PreRegGuard { get; init; }
     public IPayloadVerifier? PayloadVerifier { get; init; }
+
+    // ── Phase 2 的守門件，同樣全部可換 ──
+    public ICalibrator? Calibrator { get; init; }
+    public ICorrelationEstimator? Correlation { get; init; }
+    public IExperimentSelector? Selector { get; init; }
+    public ILikelihoodSensitivityAnalyzer? Sensitivity { get; init; }
+    public IDecisionStabilityAnalyzer? Stability { get; init; }
+    public IHypothesisSaturationEstimator? Saturation { get; init; }
+    public IConformalCalibrator? Conformal { get; init; }
+    public IDiversityMonitor? DiversityMonitor { get; init; }
+    public IPresentationPolicy? Presentation { get; init; }
+    public IExperimentCatalog? ExperimentCatalog { get; init; }
     public Func<CaseState, IInjectionGuard, string>? CriticContext { get; init; }   // MR-17：餵原始輸出必須被擋
 
     public IReadOnlyDictionary<string, WorkflowDefinition>? Catalog { get; init; }
@@ -65,6 +79,7 @@ public sealed class TestSystem
     public required AtsSimulator World { get; init; }
     public required IReadOnlyList<ILlm> Llms { get; init; }
     public required IHumanGateway Human { get; init; }
+    public required IExperimentCatalog ExperimentCatalog { get; init; }
 
     public int LlmCallCount => Llms.OfType<ScriptedLlm>().Sum(l => l.Calls.Count);
     public IEnumerable<LlmRequest> LlmCalls => Llms.OfType<ScriptedLlm>().SelectMany(l => l.Calls);
@@ -99,9 +114,27 @@ public sealed class TestSystem
         var canonicalizer = o.Canonicalizer ?? new ClaimCanonicalizer();
         var elicitor = new LikertLikelihoodElicitor();
 
+        // 集成器帶校準與相關性折扣：多個同 family 的 agent 講同一句話，不該算成多個獨立證據
+        var ensembler = new CalibratedEnsembler(o.Calibrator, o.Correlation ?? new BlendedCorrelation());
+        var bayes = new TemperedBayesUpdater();
+        var decision = new DecisionEngine();
+        var experimentCatalog = o.ExperimentCatalog ?? new InMemoryExperimentCatalog();
+
+        var kit = new Phase2Kit
+        {
+            Selector          = o.Selector ?? new EvoiExperimentSelector(),
+            Sensitivity       = o.Sensitivity ?? new LikelihoodSensitivityAnalyzer(bayes),
+            Stability         = o.Stability,     // null → StandardHandlers 用現成的 ensembler/bayes/decision 組
+            Saturation        = o.Saturation ?? new Chao1SaturationEstimator(),
+            Conformal         = o.Conformal ?? new ConformalCalibrator(),
+            Diversity         = o.DiversityMonitor ?? new DiversityMonitor(),
+            Presentation      = o.Presentation ?? new PresentationPolicy(),
+            ExperimentCatalog = experimentCatalog
+        };
+
         var engine = new WorkflowEngine();
-        new StandardHandlers(registry, runner, verifiers, new SimpleEnsembler(), new TemperedBayesUpdater(),
-                             new DecisionEngine(), human, guard, rng, policy, claimCatalog, canonicalizer, elicitor)
+        new StandardHandlers(registry, runner, verifiers, ensembler, bayes, decision,
+                             human, guard, rng, policy, claimCatalog, canonicalizer, elicitor, kit)
             .RegisterAll(engine);
         o.ExtraHandlers?.Invoke(engine);
 
@@ -116,12 +149,13 @@ public sealed class TestSystem
             new StrategyRouter(registry), engine,
             o.Assurance ?? new AssuranceService(o.Gate ?? new AbstentionGate()),
             new EvaluationService(), new CatalogWriter(claimCatalog), payloads,
-            o.Catalog ?? WorkflowCatalog.Default());
+            o.Catalog ?? WorkflowCatalog.Default(), rng);
 
         return new TestSystem
         {
             Orchestrator = orchestrator, Registry = registry, PolicyStore = policy, ClaimCatalog = claimCatalog,
-            Engine = engine, Permission = permission, Clock = clock, World = world, Llms = llms, Human = human
+            Engine = engine, Permission = permission, Clock = clock, World = world, Llms = llms, Human = human,
+            ExperimentCatalog = experimentCatalog
         };
     }
 

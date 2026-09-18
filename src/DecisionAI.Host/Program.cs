@@ -22,8 +22,10 @@ Print(c1);
 if (c1.State.Decision?.RecommendedAction is string action)
 {
     var (cycles, failures) = sys.World.Deploy(action, cycles: 100_000);
-    var truth = c1.State.Claims.ToImmutableDictionary(k => k.LocalId, k => k.LocalId == "H1");
-    var next = sys.Orchestrator.RecordOutcome(c1.Journal, new Outcome("H1", truth, VerifierLevel.L5_RealOutcome,
+    // 真相以 mechanism 表示（競態），再對映到本案的本地編號——本地編號每次可能不同
+    string trueId = c1.State.Claims.First(k => k.Frame.Mechanism == Mechanisms.RaceCondition).LocalId;
+    var truth = c1.State.Claims.ToImmutableDictionary(k => k.LocalId, k => k.LocalId == trueId);
+    var next = sys.Orchestrator.RecordOutcome(c1.Journal, new Outcome(trueId, truth, VerifierLevel.L5_RealOutcome,
         $"部署 {action} 後 {cycles:N0} 次循環，失效 {failures} 次"));
     Console.WriteLine("\n" + string.Join("\n", c1.State.Log.Where(l => l.StartsWith("[outcome]"))));
     Console.WriteLine("\n" + next.Report());
@@ -75,8 +77,16 @@ static void Print(CaseRun run)
         Console.WriteLine($"    能力層：{cap.BestPassedLevel} 上限 {cap.Cap:F2}{(cap.Degraded ? "（降級）" : "")}");
         foreach (var why in cap.DegradedReasons) Console.WriteLine($"      · {why}");
     }
-    Console.WriteLine($"    覆蓋層：{(r.Coverage is null ? "n/a（Phase 2）" : r.Coverage.TargetCoverage.ToString("P0"))}");
-    if (r.Stability is { } st) Console.WriteLine($"    穩定層：穩健性 {st.Robustness:P0}  最壞 {st.WorstCase:F0}  最大後悔 {st.MaxRegret:F0}");
+    Console.WriteLine($"    覆蓋層：{(r.Coverage is null ? "n/a（校準樣本不足或題型不在白名單）" : $"{r.Coverage.TargetCoverage:P0} {{{string.Join(", ", r.Coverage.PredictionSet)}}}")}");
+    if (r.Stability is { } st)
+    {
+        // 三種擾動分開列：合成一個數字就看不出是哪一種擾動讓結論翻掉
+        Console.WriteLine($"    穩定層：機率擾動 {st.Robustness:P0}  最壞 {st.WorstCase:F0}  最大後悔 {st.MaxRegret:F0}");
+        Console.WriteLine($"          　假設集重抽樣 {(st.DecisionStabilityUnderResampling is { } q ? q.ToString("P0") : "n/a")}；" +
+                          $"似然 ±1 級排序{(st.PosteriorOrderStableUnderLikertShift switch { true => "不變", false => "會變（結論撐在估計值上）", _ => " n/a" })}");
+    }
+    if (r.HypothesisCoverage is { } hc)
+        Console.WriteLine($"    假設覆蓋：singletons {hc.Singletons}、doubletons {hc.Doubletons}、估計未發現 {hc.EstimatedUndiscovered:F1}");
     if (r.Abstention.Abstained)
     {
         Console.WriteLine($"    拒答：{r.Abstention.Code} — {r.Abstention.Explanation}");

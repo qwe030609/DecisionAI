@@ -46,17 +46,19 @@ public sealed class CaseOrchestrator
     private readonly CatalogWriter _catalogWriter;
     private readonly PayloadBuilder _payloads;
     private readonly IReadOnlyDictionary<string, WorkflowDefinition> _workflows;
+    private readonly IRandomSource _rng;
 
     public CaseOrchestrator(IPolicyStore policy, IClaimCatalog catalog, IRolePermission permission, IClock clock,
                             IEvidenceStore evidence, VerifierRegistry verifiers, IVerifiabilityTriage triage,
                             IToolModelRouter tools, IRoleAssigner roles, IStrategyRouter strategy, IWorkflowEngine engine,
                             IAssuranceService assurance, IEvaluationService evaluation, CatalogWriter catalogWriter,
-                            PayloadBuilder payloads, IReadOnlyDictionary<string, WorkflowDefinition> workflows)
+                            PayloadBuilder payloads, IReadOnlyDictionary<string, WorkflowDefinition> workflows,
+                            IRandomSource rng)
     {
         _policy = policy; _catalog = catalog; _permission = permission; _clock = clock; _evidence = evidence;
         _verifiers = verifiers; _triage = triage; _tools = tools; _roles = roles; _strategy = strategy;
         _engine = engine; _assurance = assurance; _evaluation = evaluation; _catalogWriter = catalogWriter;
-        _payloads = payloads; _workflows = workflows;
+        _payloads = payloads; _workflows = workflows; _rng = rng;
     }
 
     public async Task<CaseRun> RunAsync(string caseId, DecisionRequest req, IReadOnlyList<EvidenceDraft> evidence,
@@ -93,8 +95,10 @@ public sealed class CaseOrchestrator
         var plan = _strategy.Plan(t.Facts, policy, survey.Budget, survey.Degradation);
 
         // ④b 依計畫需要的角色做實際指派（硬約束：critic ∉ 本案 solver）
+        //     亂數子流以 caseId 命名：同一個 case 重跑必然抽到同一組角色（MR-10 可重放），
+        //     不同 case 之間則各自獨立，Thompson 的探索才不會被鎖死在同一個順序上。
         var demand = BuildDemand(plan, t.Facts.Domain);
-        var assignment = _roles.Assign(demand, policy);
+        var assignment = _roles.Assign(demand, policy, _rng.Fork(caseId));
         j.ApplyOrThrow(new RolesAssigned(assignment.Slots, assignment.Budget, assignment.Degradation, assignment.Rationale)
                        .By("roles", "assigner", Actors.System));
 

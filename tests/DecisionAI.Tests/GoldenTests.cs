@@ -25,26 +25,38 @@ public class GoldenTests
         var run = await sys.Orchestrator.RunAsync("CASE-001", AtsScenario.Request(), AtsScenario.Evidence());
         var s = run.State;
 
+        // 本地編號取決於哪個 solver 先被指派（Thompson 每次可能不同），
+        // 所以斷言一律用 mechanism 定位，不用 H1/H2。
+        string race = s.IdOf(Mechanisms.RaceCondition), opinion = s.IdOf(Mechanisms.ProtocolViolation);
+
         Assert.False(run.Report.Abstention.Abstained);
         Assert.Equal("A", s.Decision!.RecommendedAction);
-        Assert.Equal("H1", s.Beliefs.MaxBy(kv => kv.Value).Key);
+        Assert.Equal(race, s.Beliefs.MaxBy(kv => kv.Value).Key);
         Assert.Equal(VerifierLevel.L4_Experiment, run.Report.Capability!.BestPassedLevel);
         Assert.Equal(0.95, run.Report.Capability.Cap);
         Assert.False(run.Report.Capability.Degraded);
-        Assert.Null(run.Report.Coverage);                                       // Phase 1：覆蓋層留 null
+        Assert.Null(run.Report.Coverage);                                       // 校準樣本不足 → 不給假保證
         Assert.All(s.PlannedSteps, id => Assert.Equal("ok", s.StepStatus[id]));
 
-        // 四元組合併：solver-B 用不同措辭描述同樣的 Mechanism|Locus，仍然合併成 H1 / H2
-        Assert.Equal(new[] { "H1", "H2", "H3", "H4" }, s.Claims.Select(k => k.LocalId));
-        Assert.Equal(Mechanisms.RaceCondition, s.ClaimByLocalId("H1")!.Frame.Mechanism);
-        Assert.Equal(3, s.ClaimByLocalId("H1")!.Proposals.Count);               // A、B、C 都提了 H1
-        Assert.True(s.ClaimByLocalId("H4")!.IsOpinion);                         // 無證據引用 → 意見
-        Assert.DoesNotContain("H4", s.Beliefs.Keys);
+        // Phase 2 的三擾動：三個欄位都要有值，而且分開列
+        var st = run.Report.Stability!;
+        Assert.Equal(1.0, st.Robustness);
+        Assert.NotNull(st.DecisionStabilityUnderResampling);
+        Assert.True(st.PosteriorOrderStableUnderLikertShift);
+        Assert.False(run.Report.LikelihoodSensitive);
+        Assert.NotNull(run.Report.HypothesisCoverage);
 
-        // Catalog：三條種子命中，H4 是新條目候選
-        Assert.All(new[] { "H1", "H2", "H3" }, id => Assert.True(s.ClaimByLocalId(id)!.Key.IsCatalogued));
-        Assert.False(s.ClaimByLocalId("H4")!.Key.IsCatalogued);
-        Assert.Equal(MatchKind.New, s.ClaimByLocalId("H4")!.Match);
+        // 四元組合併：solver-B 用不同措辭描述同樣的 Mechanism|Locus，仍然合併成同一條
+        Assert.Equal(4, s.Claims.Count);
+        Assert.Equal(3, s.ClaimByLocalId(race)!.Proposals.Count);               // A、B、C 都提了競態
+        Assert.True(s.ClaimByLocalId(opinion)!.IsOpinion);                      // 無證據引用 → 意見
+        Assert.DoesNotContain(opinion, s.Beliefs.Keys);
+
+        // Catalog：三條種子命中，意見那條是新條目候選
+        Assert.All(new[] { Mechanisms.RaceCondition, Mechanisms.LifecycleMisuse, Mechanisms.EnvironmentalStress },
+                   m => Assert.True(s.ClaimByLocalId(s.IdOf(m))!.Key.IsCatalogued));
+        Assert.False(s.ClaimByLocalId(opinion)!.Key.IsCatalogued);
+        Assert.Equal(MatchKind.New, s.ClaimByLocalId(opinion)!.Match);
 
         // 證據永不進 system prompt，且被中性化區塊包住
         foreach (var call in sys.LlmCalls)
@@ -106,11 +118,13 @@ public class GoldenTests
         Assert.Equal(0, run.State.PolicyVersion);
         long catalogBefore = sys.ClaimCatalog.CurrentVersion;
 
-        var truth = run.State.Claims.ToImmutableDictionary(k => k.LocalId, k => k.LocalId == "H1");
-        var next = sys.Orchestrator.RecordOutcome(run.Journal, new Outcome("H1", truth, VerifierLevel.L5_RealOutcome, "部署 A"));
+        string race = run.State.IdOf(Mechanisms.RaceCondition);                 // 真相是競態，不是某個固定編號
+        var truth = run.State.Claims.ToImmutableDictionary(k => k.LocalId, k => k.LocalId == race);
+        var next = sys.Orchestrator.RecordOutcome(run.Journal, new Outcome(race, truth, VerifierLevel.L5_RealOutcome, "部署 A"));
 
         Assert.Equal(1, next.Version);
         Assert.Equal(0, run.State.PolicyVersion);                               // 進行中的 case 仍 pin 在 v0
+        // solver-A 首選競態（對）、solver-B 首選生命週期（錯）→ 後驗分開
         Assert.Equal(2.0 / 3, next.Weight("solver-A", AtsScenario.Domain, "solver").Mean, 3);
         Assert.Equal(1.0 / 3, next.Weight("solver-B", AtsScenario.Domain, "solver").Mean, 3);
         Assert.Empty(sys.PolicyStore.Pin(0).Weights);                           // v0 快照不可變

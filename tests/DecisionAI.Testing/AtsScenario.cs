@@ -46,10 +46,17 @@ public static class AtsScenario
         Goal: "找到最可能的根因、設計驗證實驗、選出修復行動",
         Domain: Domain,
         Constraints: new Constraints(Budget: 3.0, MaxLatencySeconds: 120, RiskLevel: RiskLevel.High),
+        // 效用矩陣用 mechanism 當情境鍵：人是在案子開始前給的，不可能知道本案的 H 編號
         Actions: ImmutableArray.Create(
-            Action("A", "修改 KeepAlive timer 的鎖（根因修復）", ("H1", 100), ("H2", -20), ("H3", -30), ("H4", -30)),
-            Action("B", "移除 KeepAlive（workaround）",       ("H1", 60), ("H2", 10), ("H3", -30), ("H4", -30)),
-            Action("C", "外層 retry 包裝（治標）",             ("H1", 20), ("H2", 20), ("H3", 30), ("H4", 30))),
+            Action("A", "修改 KeepAlive timer 的鎖（根因修復）",
+                   (Mechanisms.RaceCondition, 100), (Mechanisms.LifecycleMisuse, -20),
+                   (Mechanisms.EnvironmentalStress, -30), (Mechanisms.ConfigurationError, -30)),
+            Action("B", "移除 KeepAlive（workaround）",
+                   (Mechanisms.RaceCondition, 60), (Mechanisms.LifecycleMisuse, 10),
+                   (Mechanisms.EnvironmentalStress, -30), (Mechanisms.ConfigurationError, -30)),
+            Action("C", "外層 retry 包裝（治標）",
+                   (Mechanisms.RaceCondition, 20), (Mechanisms.LifecycleMisuse, 20),
+                   (Mechanisms.EnvironmentalStress, 30), (Mechanisms.ConfigurationError, 30))),
         RiskPolicy: new RiskPolicy(MaxAcceptableLoss: 50));
 
     private static ActionOption Action(string id, string desc, params (string, double)[] u)
@@ -95,24 +102,69 @@ public static class AtsScenario
             (NetworkFrame, "Unlikely", new[] { 5 }, new[] { 3 }),
             (PlcFrame, "Unlikely", Array.Empty<int>(), Array.Empty<int>())),
 
-        "critic" => """
-            {"critiques":[
-              {"claimId":"H1","issue":"證據充分；需確認 timer callback 是否可重入","severity":0.2},
-              {"claimId":"H2","issue":"EV-004 顯示斷線由 ATS 主動關閉，與 H1 同樣相容，區分力不足","severity":0.5},
-              {"claimId":"H3","issue":"EV-003 直接反駁：同時段無 port flap","severity":0.8},
-              {"claimId":"H4","issue":"沒有任何證據；EV-004 反駁","severity":0.9}]}
-            """,
+        "critic" => Critique(req.User),
 
-        "experiment_designer" => """
-            {"experiments":[
-              {"description":"停用 KeepAlive timer，連跑 5000 次循環","outcomes":["失效率下降 >80%","無明顯變化"],"cost":0.4,
-               "votes":{"H1":["AlmostCertain","AlmostImpossible"],"H2":["Unlikely","Likely"],"H3":["AlmostImpossible","AlmostCertain"]}}]}
-            """,
+        "experiment_designer" => Design(req.User),
 
         "briefer" => Brief(req.System),
         Actors_StageSolver => $"[{who}] 段落交付物：{Between(req.User, "本段任務：", "\n")}",
         _ => $"[{who}] {req.User[..Math.Min(40, req.User.Length)]}…"
     });
+
+
+    // ── 批判與實驗設計都要「讀 prompt 才知道本案的 H 編號」──────────────────
+    //  本地編號取決於哪個 solver 先被指派（Thompson 每次可能不同），
+    //  所以腳本人格不能把 H1/H2 寫死——真正的模型也是看 prompt 才知道編號的。
+    //  這同時讓 MR-19（角色輪換）與 golden 案並存：輪換了，內容仍對得上。
+
+    /// <summary>從 user prompt 的「目前假設」段落取出 mechanism → 本地編號。</summary>
+    public static Dictionary<string, string> IdsByMechanism(string userPrompt)
+    {
+        var map = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var line in userPrompt.Split('\n'))
+        {
+            int colon = line.IndexOf(": [", StringComparison.Ordinal);
+            if (colon <= 0) continue;
+            string id = line[..colon].Trim();
+            int close = line.IndexOf(']', colon + 3);
+            if (close < 0 || id.Length == 0 || id[0] != 'H') continue;
+            map[line[(colon + 3)..close]] = id;
+        }
+        return map;
+    }
+
+    private static string Critique(string userPrompt)
+    {
+        var id = IdsByMechanism(userPrompt);
+        var items = new List<string>();
+        void Add(string mech, string issue, double sev)
+        { if (id.TryGetValue(mech, out var h)) items.Add($$"""{"claimId":"{{h}}","issue":"{{issue}}","severity":{{sev}}}"""); }
+
+        Add(Mechanisms.RaceCondition,       "證據充分；需確認 timer callback 是否可重入", 0.2);
+        Add(Mechanisms.LifecycleMisuse,     "EV-004 顯示斷線由 ATS 主動關閉，與競態假設同樣相容，區分力不足", 0.5);
+        Add(Mechanisms.EnvironmentalStress, "EV-003 直接反駁：同時段無 port flap", 0.8);
+        Add(Mechanisms.ConfigurationError,  "沒有任何證據；EV-004 反駁", 0.9);
+        return $$"""{"critiques":[{{string.Join(",", items)}}]}""";
+    }
+
+    private static string Design(string userPrompt)
+    {
+        var id = IdsByMechanism(userPrompt);
+        var votes = new List<string>();
+        void Vote(string mech, string a, string b)
+        { if (id.TryGetValue(mech, out var h)) votes.Add($"\"{h}\":[\"{a}\",\"{b}\"]"); }
+
+        // 設計者「賭」競態：停掉 timer 若失效率大降，最支持競態、最不支持環境因素
+        Vote(Mechanisms.RaceCondition,       "AlmostCertain",   "AlmostImpossible");
+        Vote(Mechanisms.LifecycleMisuse,     "Unlikely",        "Likely");
+        Vote(Mechanisms.EnvironmentalStress, "AlmostImpossible", "AlmostCertain");
+        string voteBlock = "{" + string.Join(",", votes) + "}";
+        return $$"""
+            {"experiments":[
+              {"description":"停用 KeepAlive timer，連跑 5000 次循環","outcomes":["失效率下降 >80%","無明顯變化"],"cost":0.4,
+               "votes":{{voteBlock}}}]}
+            """;
+    }
 
     private const string Actors_StageSolver = "stage_solver";
 

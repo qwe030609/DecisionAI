@@ -2,6 +2,9 @@
 //  流程目錄：流程是資料。
 //  Rev2 新增 step type：claim_canonicalize（主張對映 Catalog）、
 //  experiment_register（LLM 提名 → 確定性程式登記似然表與 hash）。
+//  Phase 2 再加上四個確定性步驟：saturation_check（Chao1）、sensitivity_analysis（似然 ±1）、
+//  stability_resample（假設集重抽樣）、coverage（conformal）。
+//  它們一個 token 都不花，但決定了 Assurance 三層裡有多少是真的。
 // ============================================================================
 
 using DecisionAI.Core.Domain;
@@ -18,6 +21,7 @@ public static class WorkflowCatalog
         {"name":"engineering_root_cause","steps":[
           {"id":"solvers",    "type":"parallel_agents","params":{"role":"solver"}},
           {"id":"canon",      "type":"claim_canonicalize","dependsOn":["solvers"]},
+          {"id":"saturate",   "type":"saturation_check","dependsOn":["canon"]},
           {"id":"rules",      "type":"verify","dependsOn":["canon"],"params":{"level":"2"}},
           {"id":"critic",     "type":"verify","dependsOn":["canon"],"params":{"level":"1"}},
           {"id":"test",       "type":"verify","dependsOn":["rules","critic"],"params":{"level":"3"}},
@@ -27,7 +31,10 @@ public static class WorkflowCatalog
           {"id":"approve",    "type":"human_checkpoint","dependsOn":["register"],"params":{"what":"實驗計畫"}},
           {"id":"run_exp",    "type":"verify","dependsOn":["approve"],"params":{"level":"4"},"timeout":{"seconds":600,"onTimeout":"FailClosed"}},
           {"id":"posterior",  "type":"probability","dependsOn":["run_exp"],"params":{"mode":"update"}},
-          {"id":"decide",     "type":"decision","dependsOn":["posterior"]}
+          {"id":"sensitive",  "type":"sensitivity_analysis","dependsOn":["posterior"]},
+          {"id":"decide",     "type":"decision","dependsOn":["sensitive"]},
+          {"id":"stability",  "type":"stability_resample","dependsOn":["decide"]},
+          {"id":"cover",      "type":"coverage","dependsOn":["decide"]}
         ]}
         """,
         // 同上，但省略 L1 critic：有 L3+ 機器驗證器時 critic 的邊際價值極低
@@ -35,6 +42,7 @@ public static class WorkflowCatalog
         {"name":"engineering_root_cause_nocritic","steps":[
           {"id":"solvers",    "type":"parallel_agents","params":{"role":"solver"}},
           {"id":"canon",      "type":"claim_canonicalize","dependsOn":["solvers"]},
+          {"id":"saturate",   "type":"saturation_check","dependsOn":["canon"]},
           {"id":"rules",      "type":"verify","dependsOn":["canon"],"params":{"level":"2"}},
           {"id":"test",       "type":"verify","dependsOn":["rules"],"params":{"level":"3"}},
           {"id":"prior",      "type":"probability","dependsOn":["test"],"params":{"mode":"prior"}},
@@ -43,17 +51,23 @@ public static class WorkflowCatalog
           {"id":"approve",    "type":"human_checkpoint","dependsOn":["register"],"params":{"what":"實驗計畫"}},
           {"id":"run_exp",    "type":"verify","dependsOn":["approve"],"params":{"level":"4"},"timeout":{"seconds":600,"onTimeout":"FailClosed"}},
           {"id":"posterior",  "type":"probability","dependsOn":["run_exp"],"params":{"mode":"update"}},
-          {"id":"decide",     "type":"decision","dependsOn":["posterior"]}
+          {"id":"sensitive",  "type":"sensitivity_analysis","dependsOn":["posterior"]},
+          {"id":"decide",     "type":"decision","dependsOn":["sensitive"]},
+          {"id":"stability",  "type":"stability_resample","dependsOn":["decide"]},
+          {"id":"cover",      "type":"coverage","dependsOn":["decide"]}
         ]}
         """,
         """
         {"name":"solver_verifier","steps":[
           {"id":"solvers","type":"parallel_agents","params":{"role":"solver"}},
           {"id":"canon",  "type":"claim_canonicalize","dependsOn":["solvers"]},
+          {"id":"saturate","type":"saturation_check","dependsOn":["canon"]},
           {"id":"rules",  "type":"verify","dependsOn":["canon"],"params":{"level":"2"}},
           {"id":"test",   "type":"verify","dependsOn":["rules"],"params":{"level":"3"}},
           {"id":"prior",  "type":"probability","dependsOn":["test"],"params":{"mode":"prior"}},
-          {"id":"decide", "type":"decision","dependsOn":["prior"]}
+          {"id":"decide", "type":"decision","dependsOn":["prior"]},
+          {"id":"stability","type":"stability_resample","dependsOn":["decide"]},
+          {"id":"cover",  "type":"coverage","dependsOn":["decide"]}
         ]}
         """,
     }.Select(WorkflowDefinition.FromJson).ToDictionary(w => w.Name);

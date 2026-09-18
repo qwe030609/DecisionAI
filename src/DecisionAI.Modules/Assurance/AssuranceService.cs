@@ -1,6 +1,10 @@
 // ============================================================================
 //  Assurance — 從 CaseState 組出三層 + 拒絕判定。此資料夾不得出現 ILlm。
-//  Phase 1：能力層 + Abstention（含型別化 payload）；覆蓋層留 null，三擾動 Stability 在 Phase 2。
+//
+//  Phase 2：三層真的被填滿了——
+//   · 覆蓋層：由 CoveragePredicted 事件帶進來（白名單外的題型根本不會有這個事件）
+//   · 穩定層：三種擾動（機率 ±δ、假設集重抽樣、似然等級 ±1）永遠分開列，不合成一個數字
+//   · 能力層：Chao1 覆蓋率太低時額外降級——沒把假設空間找完，驗證得再漂亮也只是在驗一個小角落
 // ============================================================================
 
 using System.Collections.Immutable;
@@ -46,6 +50,9 @@ public sealed class AssuranceService : IAssuranceService
     private readonly IAbstentionGate _gate;
     public AssuranceService(IAbstentionGate gate) => _gate = gate;
 
+    /// <summary>Chao1 覆蓋率低於此值就降級能力層。預先登記，不在看到結果後調整。</summary>
+    public double MinHypothesisCoverage { get; init; } = 0.60;
+
     public AssuranceReport Build(CaseState s)
     {
         var abstention = _gate.Evaluate(s);
@@ -60,11 +67,29 @@ public sealed class AssuranceService : IAssuranceService
         if (s.Budget is { EnsembleClaimsPermitted: false })
             reasons.Add("不准宣稱集成增益：多個一致的答案在此不構成額外證據");
 
+        // 假設覆蓋率：discovered 是本案已進機率引擎的假設數
+        int discovered = s.Hypotheses.Count();
+        if (s.Saturation is { } sat)
+        {
+            double coverage = Chao1SaturationEstimator.Coverage(discovered, sat);
+            if (coverage < MinHypothesisCoverage)
+                reasons.Add($"假設空間探索不足（Chao1 覆蓋率 {coverage:P0} < {MinHypothesisCoverage:P0}，singletons {sat.Singletons}）：" +
+                            "驗證得再漂亮也只是在驗一個小角落");
+        }
+        if (s.DiversityCollapsed == true) reasons.Add("多樣性不足（處置階梯已用盡）：候選之間的差異只是措辭");
+
         var capability = new CapabilityLayer(level, VerifierTrust.Cap(level),
                                              reasons.Count > 0, reasons.ToImmutableArray());
-        var stability = s.Decision is { } d ? new StabilityLayer(d.Robustness, d.WorstCase, d.MaxRegret) : null;
-        return new AssuranceReport(capability, Coverage: null, stability, abstention,
-                                   LikelihoodSensitive: false, HypothesisCoverage: s.Saturation);
+
+        // 三擾動永遠分開列：合成一個數字就看不出是哪一種擾動讓結論翻掉
+        var stability = s.Decision is { } d
+            ? new StabilityLayer(d.Robustness, d.WorstCase, d.MaxRegret,
+                                 DecisionStabilityUnderResampling: s.ResamplingStability,
+                                 PosteriorOrderStableUnderLikertShift: s.SensitivityDetail is null ? null : !s.LikelihoodSensitive)
+            : null;
+
+        return new AssuranceReport(capability, s.Coverage, stability, abstention,
+                                   LikelihoodSensitive: s.LikelihoodSensitive, HypothesisCoverage: s.Saturation);
     }
 }
 

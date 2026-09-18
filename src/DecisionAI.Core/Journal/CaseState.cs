@@ -42,6 +42,13 @@ public sealed record CaseState
     public Outcome? Outcome { get; init; }
     public SaturationEstimate? Saturation { get; init; }
 
+    // ── Phase 2：三擾動 / 覆蓋 / 多樣性的判定結果，由 Assurance 直接讀 ──
+    public bool LikelihoodSensitive { get; init; }
+    public string? SensitivityDetail { get; init; }
+    public double? ResamplingStability { get; init; }
+    public CoverageLayer? Coverage { get; init; }
+    public bool? DiversityCollapsed { get; init; }
+
     public double CostSpent { get; init; }
     public ImmutableDictionary<string, string> StepStatus { get; init; } = ImmutableDictionary<string, string>.Empty;
     public ImmutableHashSet<string> PartialSteps { get; init; } = ImmutableHashSet<string>.Empty;
@@ -57,6 +64,18 @@ public sealed record CaseState
     public VerifierLevel BestPassedLevel()
         => Verifications.Where(v => v.Pass == true).Select(v => v.Level).DefaultIfEmpty(VerifierLevel.None).Max();
     public string Domain => Facts?.Domain ?? Request?.Domain ?? "general";
+    /// <summary>
+    /// 效用矩陣對齊到本案的本地編號：人給的矩陣可能用 mechanism 或 catalog id 當鍵，
+    /// 而本地編號要等 solver 跑完才存在。對齊是純函數，不寫回事件流。
+    /// </summary>
+    public ImmutableArray<ActionOption> AlignedUtilities => Scenarios.Align(
+        Utilities, Claims.Select(c => (c.LocalId, c.Key.Value, c.Frame.Mechanism)));
+
+    /// <summary>用 mechanism 找本案的本地編號。編號隨指派順序改變，mechanism 不會。</summary>
+    public string IdOf(string mechanism)
+        => Claims.FirstOrDefault(c => c.Frame.Mechanism == mechanism)?.LocalId
+           ?? throw new InvalidOperationException($"本案沒有 mechanism={mechanism} 的主張");
+
     public Claim? ClaimByLocalId(string id) => Claims.FirstOrDefault(c => c.LocalId == id);
 
     public static CaseState Empty(string id) => new() { Id = id };
@@ -84,6 +103,15 @@ public static class CaseReducer
         ClaimCanonicalized cc  => s with { Claims = Canonicalize(s.Claims, cc),
                                            Log = s.Log.Add($"[{e.StepId}] {cc.LocalId} → {cc.CatalogId}（{cc.Match}{(cc.Match == MatchKind.Fuzzy ? $" {cc.MatchScore:F2}" : "")}{(cc.WasNewEntry ? "，新條目候選" : "")}）") },
         SaturationEstimated sa => s with { Saturation = new SaturationEstimate(sa.Singletons, sa.Doubletons, sa.EstimatedUndiscovered) },
+
+        SensitivityAssessed sv => s with { LikelihoodSensitive = s.LikelihoodSensitive || sv.OrderChanged, SensitivityDetail = sv.Detail,
+                                           Log = s.Log.Add($"[{e.StepId}] 似然敏感度：{sv.Detail}") },
+        StabilityResampled sr  => s with { ResamplingStability = sr.StabilityRate,
+                                           Log = s.Log.Add($"[{e.StepId}] 決策穩定度：{sr.Detail}") },
+        CoveragePredicted cv   => s with { Coverage = new CoverageLayer(cv.TargetCoverage, cv.PredictionSet),
+                                           Log = s.Log.Add($"[{e.StepId}] 覆蓋層（{cv.TaskFamily}）：{cv.Detail}") },
+        DiversityAssessed dv   => s with { DiversityCollapsed = dv.Collapsed,
+                                           Log = s.Log.Add($"[{e.StepId}] 多樣性：{dv.Detail}") },
 
         ExperimentNominated n  => s with { Nominations = s.Nominations.Add(n.Draft) },
         ExperimentPreRegistered x => s with { Experiments = s.Experiments.Add(x.Experiment) },

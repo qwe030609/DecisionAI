@@ -6,6 +6,13 @@
 //  Rev2 新增兩個 step type：
 //    claim_canonicalize   主張對映 Catalog；灰帶升級 arbiter，不自動猜
 //    experiment_register  designer 只提名，登記（似然定案 + hash）由確定性程式做
+//
+//  Phase 2 再加四個，全部是確定性守門件（不花任何 token）：
+//    saturation_check     Chao1 假設覆蓋率 → 覆蓋率低就降級能力層
+//    sensitivity_analysis 似然等級整體 ±1 → 排序變了就掛 LikelihoodSensitive
+//    stability_resample   假設集重抽樣 → 推薦行動不變的比例
+//    coverage             conformal 覆蓋層（只對白名單題型）
+//    diversity_check      mode collapse 監測（創作 / 潛台詞題型用）
 // ============================================================================
 
 using System.Collections.Immutable;
@@ -14,13 +21,32 @@ using DecisionAI.Core.Domain;
 using DecisionAI.Core.Journal;
 using DecisionAI.Core.Ports;
 using DecisionAI.Modules.Agents;
+using DecisionAI.Modules.Assurance;
 using DecisionAI.Modules.Catalog;
 using DecisionAI.Modules.Decision;
+using DecisionAI.Modules.Diversity;
+using DecisionAI.Modules.Humans;
 using DecisionAI.Modules.Probability;
 using DecisionAI.Modules.Verification;
 using DecisionAI.Modules.Workflow;
 
 namespace DecisionAI.Orchestration;
+
+/// <summary>
+/// Phase 2 的確定性守門件打包成一組，好讓每一個都能單獨換成 broken 版本做 mutation testing。
+/// 全部有預設值：Phase 1 的呼叫端不必改。
+/// </summary>
+public sealed record Phase2Kit
+{
+    public IExperimentSelector Selector { get; init; } = new EvoiExperimentSelector();
+    public ILikelihoodSensitivityAnalyzer Sensitivity { get; init; } = new LikelihoodSensitivityAnalyzer();
+    public IDecisionStabilityAnalyzer? Stability { get; init; }          // null → 用 ensembler/bayes/decision 現組
+    public IHypothesisSaturationEstimator Saturation { get; init; } = new Chao1SaturationEstimator();
+    public IConformalCalibrator Conformal { get; init; } = new ConformalCalibrator();
+    public IDiversityMonitor Diversity { get; init; } = new DiversityMonitor();
+    public IPresentationPolicy Presentation { get; init; } = new PresentationPolicy();
+    public IExperimentCatalog ExperimentCatalog { get; init; } = new InMemoryExperimentCatalog();
+}
 
 public sealed class StandardHandlers
 {
@@ -37,15 +63,19 @@ public sealed class StandardHandlers
     private readonly IClaimCatalog _catalog;
     private readonly IClaimCanonicalizer _canonicalizer;
     private readonly ILikelihoodElicitor _elicitor;
+    private readonly Phase2Kit _kit;
+    private readonly IDecisionStabilityAnalyzer _stability;
 
     public StandardHandlers(IAgentRegistry registry, AgentRunner runner, VerifierRegistry verifiers, IEnsembler ensembler,
                             IBayesUpdater bayes, IDecisionEngine decision, IHumanGateway human, IInjectionGuard guard,
                             IRandomSource rng, IPolicyStore policy, IClaimCatalog catalog,
-                            IClaimCanonicalizer canonicalizer, ILikelihoodElicitor elicitor)
+                            IClaimCanonicalizer canonicalizer, ILikelihoodElicitor elicitor, Phase2Kit? kit = null)
     {
         _registry = registry; _runner = runner; _verifiers = verifiers; _ensembler = ensembler; _bayes = bayes;
         _decision = decision; _human = human; _guard = guard; _rng = rng; _policy = policy;
         _catalog = catalog; _canonicalizer = canonicalizer; _elicitor = elicitor;
+        _kit = kit ?? new Phase2Kit();
+        _stability = _kit.Stability ?? new DecisionStabilityAnalyzer(ensembler, bayes, decision);
     }
 
     public void RegisterAll(WorkflowEngine engine)
@@ -58,6 +88,11 @@ public sealed class StandardHandlers
         engine.RegisterHandler("probability",         ProbabilityAsync);
         engine.RegisterHandler("decision",            DecisionAsync);
         engine.RegisterHandler("human_checkpoint",    HumanCheckpointAsync);
+        engine.RegisterHandler("saturation_check",     SaturationAsync);
+        engine.RegisterHandler("sensitivity_analysis", SensitivityAsync);
+        engine.RegisterHandler("stability_resample",   StabilityAsync);
+        engine.RegisterHandler("coverage",             CoverageAsync);
+        engine.RegisterHandler("diversity_check",      DiversityAsync);
     }
 
     private static CaseEvent Sys(string stepId, CaseEvent e) => e.By(stepId, "handler", Actors.System);
@@ -116,9 +151,10 @@ public sealed class StandardHandlers
 
             if (r.Kind == MatchKind.Ambiguous)
             {
-                var verdict = await _human.RequestAsync(new HumanRequest(s.Id, step.Id, HumanRole.Arbiter,
+                var ask = new HumanRequest(s.Id, step.Id, HumanRole.Arbiter,
                     $"{proposed.LocalId} 的對映落在灰帶：{proposed.Frame.Identity}",
-                    r.Candidates.Insert(0, "候選 catalog 條目：").ToImmutableArray()), ct);
+                    r.Candidates.Insert(0, "候選 catalog 條目：").ToImmutableArray());
+                var verdict = await _human.RequestAsync(_kit.Presentation.Shape(ask, HumanRole.Arbiter), ct);
                 events.Add(new HumanActed(HumanRole.Arbiter.ToString(),
                     $"{proposed.LocalId} 對映灰帶", verdict.Approved, verdict.Rationale).By(step.Id, "arbiter", Actors.Human));
                 catalogId = verdict.Approved ? r.Candidates[0] : proposed.Frame.DraftId;
@@ -138,29 +174,141 @@ public sealed class StandardHandlers
         return s.ProposedFrames.Where(p => hyp.Contains(p.LocalId));
     }
 
-    // ── experiment_register：LLM 只提名；似然定案與 hash 由確定性程式做 ──
+    // ── experiment_register：LLM 只提名；似然定案、EVOI 篩選與 hash 都由確定性程式做 ──
     private Task<IReadOnlyList<CaseEvent>> RegisterExperimentsAsync(StepDef step, CaseState s, CancellationToken ct)
     {
         var events = new List<CaseEvent>();
-        var known = s.Claims.Where(c => c.Kind == ClaimKind.Hypothesis && !c.IsOpinion).Select(c => c.LocalId).ToHashSet();
+        var ctx = ElicitationContextFrom(s);
         int n = s.Experiments.Count;
 
+        // 第一步：把提名變成「有數字的候選」。此時還沒登記——EVOI 還沒算。
+        var candidates = new List<(ExperimentDraft Draft, Experiment Exp)>();
         foreach (var draft in s.Nominations)
         {
-            var (exp, skip) = _elicitor.Register(draft, $"EXP-{n + 1}", known);
-            if (exp is null)
-            {
-                events.Add(Sys(step.Id, new ExperimentSkipped(draft.DraftId, 0, skip ?? "無法登記")));
-                continue;
-            }
-            n++;
-            events.Add(Sys(step.Id, new ExperimentPreRegistered(exp)));
+            var (exp, skip) = _elicitor.Register(draft, $"EXP-{n + candidates.Count + 1}", ctx);
+            if (exp is null) { events.Add(Sys(step.Id, new ExperimentSkipped(draft.DraftId, 0, skip ?? "無法登記"))); continue; }
+            candidates.Add((draft, exp));
+        }
+        if (candidates.Count == 0) return Task.FromResult<IReadOnlyList<CaseEvent>>(events);
+
+        // 第二步：EVOI。資訊多不等於值得做——若無論出哪個結果推薦行動都一樣，這個實驗只是讓人心安。
+        var choice = _kit.Selector.Select(
+            candidates.Select(c => (c.Draft.DraftId, c.Exp.Outcomes, c.Exp.LikelihoodByClaim, c.Draft.EstimatedCost)).ToList(),
+            s.Beliefs, s.AlignedUtilities);
+
+        foreach (var v in choice.Skip)
+            events.Add(Sys(step.Id, new ExperimentSkipped(v.DraftId, v.Evoi, v.Detail)));
+
+        // 第三步：只有通過 EVOI 的才真的登記（hash 在這一刻定案，L4 執行前會比對）
+        foreach (var v in choice.Run)
+        {
+            var c = candidates.First(x => x.Draft.DraftId == v.DraftId);
+            events.Add(Sys(step.Id, new ExperimentPreRegistered(c.Exp)));
             events.Add(Sys(step.Id, new Noted(
-                $"{exp.Id} 登記（來源 {exp.LikelihoodSource}，hash {exp.LikelihoodHash[..8]}…）：{exp.Description}；" +
-                string.Join(" ", exp.LikertByClaim.OrderBy(kv => kv.Key, StringComparer.Ordinal)
+                $"{c.Exp.Id} 登記（來源 {c.Exp.LikelihoodSource}，EVOI {v.Evoi:F2}，hash {c.Exp.LikelihoodHash[..8]}…）：{c.Exp.Description}；" +
+                string.Join(" ", c.Exp.LikertByClaim.OrderBy(kv => kv.Key, StringComparer.Ordinal)
                     .Select(kv => $"{kv.Key}=[{string.Join(",", kv.Value.Select(Likert.Label))}]")))));
+            events.Add(Sys(step.Id, new Noted($"  · EVOI 依據：{v.Detail}")));
         }
         return Task.FromResult<IReadOnlyList<CaseEvent>>(events);
+    }
+
+    /// <summary>
+    /// 登記用的上下文：哪些主張存在、各自對到哪個 catalog 條目、以及這個實驗的歷史頻率。
+    /// catalog id 是關鍵——歷史頻率要跨案累積，只能掛在 canonical id 上，不能掛在本案的 H1/H2。
+    /// </summary>
+    private ElicitationContext ElicitationContextFrom(CaseState s)
+    {
+        var map = s.Claims
+            .Where(c => c.Kind == ClaimKind.Hypothesis && !c.IsOpinion)
+            .ToImmutableDictionary(c => c.LocalId, c => c.Key.Value);
+        return new ElicitationContext(map, _kit.ExperimentCatalog.View(_kit.ExperimentCatalog.CurrentVersion));
+    }
+
+    // ── saturation_check：Chao1。singletons 多 → 假設空間沒找完 → 能力層降級 ──
+    private Task<IReadOnlyList<CaseEvent>> SaturationAsync(StepDef step, CaseState s, CancellationToken ct)
+    {
+        int agents = s.AgentsUsedAs("solver").Count();
+        var est = _kit.Saturation.Estimate(s, agents);
+        int discovered = s.Hypotheses.Count();
+        double coverage = Chao1SaturationEstimator.Coverage(discovered, est);
+        return Task.FromResult<IReadOnlyList<CaseEvent>>(new[]
+        {
+            Sys(step.Id, new SaturationEstimated(est.Singletons, est.Doubletons, est.EstimatedUndiscovered)),
+            Sys(step.Id, new Noted($"假設飽和度：已發現 {discovered}、只有一個 agent 提過 {est.Singletons}、" +
+                                   $"估計未發現 {est.EstimatedUndiscovered:F1} → 覆蓋率 {coverage:P0}"))
+        });
+    }
+
+    // ── sensitivity_analysis：似然等級整體 ±1 級，排序變了就必須說（MR-15）──
+    private Task<IReadOnlyList<CaseEvent>> SensitivityAsync(StepDef step, CaseState s, CancellationToken ct)
+    {
+        var observed = s.Experiments.Where(e => e.ObservedOutcome is not null).ToList();
+        if (observed.Count == 0)
+            return Task.FromResult<IReadOnlyList<CaseEvent>>(new[] { Sys(step.Id, new Noted("沒有已觀察的實驗 → 不做似然敏感度分析")) });
+
+        // 用先驗重跑：s.Beliefs 此時已是後驗，拿它當輸入會把同一批似然套兩次
+        var prior = _ensembler.Prior(s, _policy.Pin(s.PolicyVersion));
+        var events = new List<CaseEvent>();
+        foreach (var exp in observed)
+        {
+            var v = _kit.Sensitivity.Analyze(prior, exp);
+            events.Add(Sys(step.Id, new SensitivityAssessed(v.OrderChanged, v.TopBaseline, v.TopUnderShift, $"{exp.Id}：{v.Detail}")));
+            prior = _bayes.Update(prior, exp);
+        }
+        return Task.FromResult<IReadOnlyList<CaseEvent>>(events);
+    }
+
+    // ── stability_resample：假設集重抽樣（MR-13 的執行點）──
+    private Task<IReadOnlyList<CaseEvent>> StabilityAsync(StepDef step, CaseState s, CancellationToken ct)
+    {
+        var v = _stability.Analyze(s, _policy.Pin(s.PolicyVersion), _rng.Fork(s.Id + ":stability"), step.PInt("trials", 25));
+        return Task.FromResult<IReadOnlyList<CaseEvent>>(new[]
+        {
+            Sys(step.Id, new StabilityResampled(v.StabilityRate, v.Trials, v.Detail))
+        });
+    }
+
+    // ── coverage：conformal。白名單外（反身、漂移）一律不給，硬給就是假保證 ──
+    private Task<IReadOnlyList<CaseEvent>> CoverageAsync(StepDef step, CaseState s, CancellationToken ct)
+    {
+        string family = step.P("family").Length > 0 ? step.P("family") : TaskFamilyClassifier.Classify(s.Facts);
+        if (!_kit.Conformal.IsApplicable(family))
+            return Task.FromResult<IReadOnlyList<CaseEvent>>(new[]
+            { Sys(step.Id, new Noted($"題型 {family} 不在 conformal 白名單（可交換性被破壞）→ 不給覆蓋層")) });
+
+        var layer = _kit.Conformal.Predict(s.Beliefs, family, _policy.Pin(s.PolicyVersion));
+        if (layer is null)
+            return Task.FromResult<IReadOnlyList<CaseEvent>>(new[]
+            { Sys(step.Id, new Noted($"題型 {family} 的校準樣本不足 → 不給覆蓋層（樣本不足的保證是假保證）")) });
+
+        return Task.FromResult<IReadOnlyList<CaseEvent>>(new[]
+        {
+            Sys(step.Id, new CoveragePredicted(family, layer.TargetCoverage, layer.PredictionSet,
+                $"目標覆蓋 {layer.TargetCoverage:P0}，預測集合 {{{string.Join(", ", layer.PredictionSet)}}}"))
+        });
+    }
+
+    // ── diversity_check：mode collapse。門檻預先登記，Minimal 降級時自動收緊 ──
+    private Task<IReadOnlyList<CaseEvent>> DiversityAsync(StepDef step, CaseState s, CancellationToken ct)
+    {
+        var candidates = s.AgentRuns
+            .Where(r => r.Ok && r.RawOutput.Length > 0)
+            .Select(r => new Candidate(r.AgentId + ":" + r.Role, r.RawOutput, r.AgentId,
+                                       s.Roles.FirstOrDefault(x => x.AgentId == r.AgentId)?.Family ?? "unknown"))
+            .ToList();
+        if (candidates.Count < 2)
+            return Task.FromResult<IReadOnlyList<CaseEvent>>(new[] { Sys(step.Id, new Noted("候選少於 2 個 → 不做多樣性監測")) });
+
+        var thresholds = s.Degradation == DegradationLevel.Minimal
+            ? DiversityThresholds.Default.Tightened()      // 同 family 的表面差異不代表真多樣性
+            : DiversityThresholds.Default;
+        var v = _kit.Diversity.Evaluate(candidates, thresholds);
+        return Task.FromResult<IReadOnlyList<CaseEvent>>(new[]
+        {
+            Sys(step.Id, new DiversityAssessed(v.Collapsed, v.FailedMetrics,
+                v.Detail + (v.Collapsed ? $"；未達標：{string.Join("、", v.FailedMetrics)}" : "")))
+        });
     }
 
     private async Task<IReadOnlyList<CaseEvent>> VerifyAsync(StepDef step, CaseState s, CancellationToken ct)
@@ -208,7 +356,7 @@ public sealed class StandardHandlers
         if (s.Utilities.Length == 0 || s.Beliefs.Count == 0)
             return Task.FromResult<IReadOnlyList<CaseEvent>>(new[] { Sys(step.Id, new Noted("沒有效用矩陣或機率分布 → 不算 EU，交人決定")) });
 
-        var result = _decision.Decide(s.Beliefs, s.Utilities, s.RiskPolicy ?? new RiskPolicy(double.PositiveInfinity), _rng.Fork(s.Id));
+        var result = _decision.Decide(s.Beliefs, s.AlignedUtilities, s.RiskPolicy ?? new RiskPolicy(double.PositiveInfinity), _rng.Fork(s.Id));
         return Task.FromResult<IReadOnlyList<CaseEvent>>(new[]
         {
             Sys(step.Id, new DecisionMade(result)),
@@ -222,15 +370,24 @@ public sealed class StandardHandlers
         if (s.Plan is { RequireHumanApproval: false })
             return new[] { Sys(step.Id, new Noted($"計畫不要求人類核准 → 通過（{what}）")) };
 
-        // 呈現順序：證據與最壞情況先、系統建議後（automation bias 防護的最小版）
+        // 呈現的整形交給伺服端的 PresentationPolicy——這條防護若交給 UI，
+        // 任何新前端（手機、Slack）都可能繞過。系統建議在這裡只是「附上」，
+        // 由 policy 決定要不要、以及在什麼順序揭示。
         var context = ImmutableArray.CreateBuilder<string>();
         context.Add($"問題：{s.Request!.Problem}");
         context.Add($"證據 {s.Evidence.Count} 條；主張 {s.Claims.Count} 條；已通過最高驗證等級 {s.BestPassedLevel()}");
         if (s.Decision is { } d) context.Add($"最壞情況 {d.WorstCase:F0}、最大後悔 {d.MaxRegret:F0}");
+        if (s.LikelihoodSensitive) context.Add("注意：似然等級 ±1 級就會改變假設排序（結論撐在一組估出來的數字上）");
+        if (s.ResamplingStability is { } rate && rate < 1)
+            context.Add($"注意：假設集重抽樣後只有 {rate:P0} 的情況仍給同一個建議");
         foreach (var e in s.Experiments.Where(e => e.ObservedOutcome is null))
             context.Add($"待跑實驗 {e.Id}：{e.Description}（似然已登記，hash {e.LikelihoodHash[..8]}…）");
 
-        var verdict = await _human.RequestAsync(new HumanRequest(s.Id, step.Id, HumanRole.Approver, what, context.ToImmutable()), ct);
+        var raw = new HumanRequest(s.Id, step.Id, HumanRole.Approver, what, context.ToImmutable())
+        {
+            SystemRecommendation = s.Decision?.RecommendedAction
+        };
+        var verdict = await _human.RequestAsync(_kit.Presentation.Shape(raw, HumanRole.Approver), ct);
         var events = new List<CaseEvent>
         {
             new HumanActed(HumanRole.Approver.ToString(), what, verdict.Approved, verdict.Rationale).By(step.Id, "approver", Actors.Human)
