@@ -1,0 +1,16 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\DecisionAI.Orchestration\DecisionAI.Orchestration.csproj" />
+    <ProjectReference Include="..\DecisionAI.Adapters\DecisionAI.Adapters.csproj" />
+    <ProjectReference Include="..\..\tests\DecisionAI.Testing\DecisionAI.Testing.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>
