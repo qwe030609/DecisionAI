@@ -25,6 +25,7 @@
   <ItemGroup>
     <ProjectReference Include="..\DecisionAI.Testing\DecisionAI.Testing.csproj" />
     <ProjectReference Include="..\..\src\DecisionAI.Adapters\DecisionAI.Adapters.csproj" />
+    <ProjectReference Include="..\..\src\DecisionAI.Persistence\DecisionAI.Persistence.csproj" />
   </ItemGroup>
 
 </Project>
