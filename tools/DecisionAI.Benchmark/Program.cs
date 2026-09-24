@@ -255,15 +255,70 @@ async Task<(DecisionAI.Orchestration.CaseRun Run, int Calls)> sys2Run(TestSystem
     return (run, sys.LlmCallCount);
 }
 
+// ══════════════════ 序列型：跨案學習與它的 mutation ══════════════════
+Console.WriteLine($"\n── 序列型學習（{SequentialSuite.Cases} 案連跑；跨案的守門件只能這樣測）──");
+var baseline = SequentialSuite.Run("baseline");
+foreach (var m in baseline.Metrics)
+    Console.WriteLine($"  {(m.Pass ? "✓" : "✗")} {m.Name,-16} {m.Detail}");
+
+// 相關池變體：一個 agent + 它的複製品 + 一個獨立的弱 agent，三個名額全滿
+Console.WriteLine("\n── 相關池變體（solver-hi + 它的複製品 + 一個獨立的弱 agent，三個 solver 名額全滿）──");
+var correlated = SequentialSuite.Run("correlated", correlatedPool: true);
+foreach (var m in correlated.Metrics)
+    Console.WriteLine($"  {(m.Pass ? "✓" : "✗")} {m.Name,-16} {m.Detail}");
+
+// 漂移變體：最強的 agent 在第 20 案後悄悄變差（等同換了模型版本）
+Console.WriteLine("\n── 漂移變體（最強的 agent 在第 20 案後從 85% 掉到 25%）──");
+var drifting = SequentialSuite.Run("drifting", drifting: true);
+foreach (var m in drifting.Metrics)
+    Console.WriteLine($"  {(m.Pass ? "✓" : m.ExpectedToDegrade ? "·" : "✗")} {m.Name,-16} " +
+                      $"{(m.ExpectedToDegrade && !m.Pass ? "[預期會退化] " : "")}{m.Detail}");
+
+var seqMutations = new List<object>();
+Console.WriteLine("\n── 序列型 mutation（跑完 40 案後，學習曲線必須走壞）──");
+foreach (var (id, name, target, why, onDrifting, apply) in SequentialSuite.Mutations)
+{
+    bool onCorrelated = id == "S2";
+    var reference = onDrifting ? drifting : onCorrelated ? correlated : baseline;
+    var r = SequentialSuite.Run(id, apply, onDrifting, onCorrelated);
+    var broke = r.Metrics.Where((x, i) => !x.Pass && reference.Metrics[i].Pass).Select(x => x.Name).ToArray();
+    // 一併列出關鍵指標的位移：有些 mutation 不會把曲線打到不合格，但會把它推向錯的方向，
+    // 那種「還沒壞但已經在變差」的資訊，比一個 pass/fail 有用。
+    var shifts = r.Metrics.Select((m, i) => (m.Name, Delta: m.Value - reference.Metrics[i].Value))
+                          .Where(x => Math.Abs(x.Delta) > 0.001)
+                          .OrderByDescending(x => Math.Abs(x.Delta)).Take(3).ToArray();
+    Console.WriteLine($"{id,-3} {name,-24} {(onDrifting ? "[漂移序列] " : onCorrelated ? "[相關池] " : "")}" +
+        (broke.Length > 0 ? $"打壞 {broke.Length} 條曲線：{string.Join("、", broke)}"
+                          : id == "S2" ? "本套件上不可觀察 —— ρ 幾乎一致時折扣等比例，加權平均會整個約掉；由單案的 Ensemble 檢查（M16）覆蓋"
+                          : "沒有打壞任何曲線 → 這個 mutation 在本套件上測不到") +
+        (shifts.Length > 0 ? "；位移：" + string.Join("、", shifts.Select(x => $"{x.Name} {x.Delta:+0.###;-0.###}")) : ""));
+    seqMutations.Add(new
+    {
+        id, name, target, why, onDrifting,
+        brokeMetrics = broke,
+        shifts = shifts.Select(x => new { metric = x.Name, delta = Math.Round(x.Delta, 4) }).ToArray(),
+        detected = broke.Length > 0,
+        metrics = r.Metrics.Select(x => new { x.Name, x.Value, x.Expected, x.Pass, x.Detail }).ToArray()
+    });
+}
+
 var report = new
 {
-    benchmark = "DecisionAI Rev2 Phase 1 · Router Benchmark",
+    benchmark = "DecisionAI Rev2 Phase 3 · Router Benchmark",
     version = "2.0",
     generatedAt = DateTime.UtcNow.ToString("O"),
     note = "LLM 為腳本化（ScriptedLlm），量的是控制流程、守門件與確定性引擎，不是模型品質。",
     summary = new { total = rows.Count, passed, abstained = abstainedCount, proceeded = rows.Count - abstainedCount },
     mutations,
     degradationLadder = ladder,
+    sequential = new
+    {
+        cases = SequentialSuite.Cases,
+        baseline = baseline.Metrics.Select(m => new { m.Name, m.Value, m.Expected, m.Pass, m.Detail }).ToArray(),
+        drifting = drifting.Metrics.Select(m => new { m.Name, m.Value, m.Expected, m.Pass, m.Detail }).ToArray(),
+        correlated = correlated.Metrics.Select(m => new { m.Name, m.Value, m.Expected, m.Pass, m.Detail }).ToArray(),
+        mutations = seqMutations
+    },
     cases = rows
 };
 

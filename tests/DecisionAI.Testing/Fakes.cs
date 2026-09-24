@@ -60,6 +60,14 @@ public sealed class ScriptedHumanGateway : IHumanGateway
     public ScriptedHumanGateway(Func<HumanRequest, HumanVerdict> decide) => _decide = decide;
     public static ScriptedHumanGateway AlwaysApprove() => new(_ => new HumanVerdict(true, "scripted: approve"));
 
+    /// <summary>
+    /// 秒殺型核准者：永遠同意、永遠一秒半就按下去。
+    /// 這不是誇張的假設——它就是橡皮圖章化在資料上長的樣子，
+    /// 而 AutomationBiasMonitor 要能認出它。
+    /// </summary>
+    public static ScriptedHumanGateway RubberStamp(double seconds = 1.5) =>
+        new(_ => new HumanVerdict(true, "scripted: approve") { Seconds = seconds });
+
     public Task<HumanVerdict> RequestAsync(HumanRequest req, CancellationToken ct = default)
     {
         Requests.Add(req);

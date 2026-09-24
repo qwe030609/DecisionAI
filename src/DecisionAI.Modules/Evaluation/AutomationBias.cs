@@ -71,8 +71,13 @@ public sealed class AutomationBiasMonitor : IAutomationBiasMonitor
         if (first > RecommendationFirstLimit) reasons.Add($"{first:P0} 的決策是先看到系統建議才表態");
 
         if (reasons.Count == 0) return OversightPolicy.Normal;
+
+        // 有徵兆就一定要有動作。只記一筆「接受率 100%」然後什麼都不做，
+        // 跟沒有監控是同一件事——而且更糟，因為報表上會顯示「已監控」。
+        // 最便宜的處置是先把建議收起來，所以它是預設動作；
+        // 要求第二位核准者比較貴，留給「又快又照單全收」這種最明確的情況。
         return new OversightPolicy(
-            RequireBlindFirstPass: first > RecommendationFirstLimit || tooFast,
+            RequireBlindFirstPass: true,
             RequireSecondApprover: accept >= RubberStampRate && tooFast,
             Reasons: reasons.ToImmutable());
     }

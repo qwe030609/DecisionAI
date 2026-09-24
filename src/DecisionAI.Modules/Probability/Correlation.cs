@@ -18,8 +18,13 @@ namespace DecisionAI.Modules.Probability;
 
 public sealed record CorrelationContext(
     ImmutableDictionary<string, AgentLineage> Lineage,
-    ImmutableDictionary<string, ImmutableHashSet<string>> ClaimsByAgent,
-    PolicySnapshot Policy);
+    ImmutableDictionary<string, ImmutableDictionary<string, double>> ProposalsByAgent,
+    PolicySnapshot Policy)
+{
+    /// <summary>只看「提了哪些」的舊視角，仍然有用（例如飽和度），但不足以判斷相關性。</summary>
+    public ImmutableHashSet<string> ClaimsOf(string agent)
+        => ProposalsByAgent.TryGetValue(agent, out var m) ? m.Keys.ToImmutableHashSet() : ImmutableHashSet<string>.Empty;
+}
 
 public sealed record AgentLineage(string Vendor, string Family, string Generation);
 
@@ -61,8 +66,16 @@ public sealed class ProbeCalibratedEstimator : ICorrelationEstimator
 }
 
 /// <summary>
-/// 第三層：本案的即時分歧。兩個 agent 提出的 canonical 主張集合越像，這一次就越相關。
-/// 這一層抓得到「共享證據誘發的相關」——那不是模型本質相關，但對集成增益一樣是壞消息。
+/// 第三層：本案的即時分歧。這一層抓得到「共享證據誘發的相關」——
+/// 那不是模型本質相關，但對集成增益一樣是壞消息。
+///
+/// 這裡刻意不只看「提了哪些主張」。序列型測試打臉過一次：
+/// 同一批候選機制之下，每個 agent 都會把三條全提出來，只是排序不同——
+/// 光看集合，三個人的 Jaccard 都是 1.0，於是每個人的折扣完全一樣，
+/// 而「對所有人一樣的折扣」在加權平均裡會整個約掉，等於沒有折扣。
+///
+/// 真正的資訊在「他們各給了多少信心」。所以相似度 = 集合重疊 × 信心向量的一致度：
+/// 提一樣的三條但排序相反的兩個人，並不是同一雙眼睛。
 /// </summary>
 public sealed class InstanceDivergenceEstimator : ICorrelationEstimator
 {
@@ -70,10 +83,27 @@ public sealed class InstanceDivergenceEstimator : ICorrelationEstimator
 
     public (double, int) Estimate(string a, string b, CorrelationContext ctx)
     {
-        if (!ctx.ClaimsByAgent.TryGetValue(a, out var ca) || !ctx.ClaimsByAgent.TryGetValue(b, out var cb)) return (0, 0);
-        if (ca.Count == 0 || cb.Count == 0) return (0, 0);
-        double jaccard = ca.Intersect(cb).Count / (double)ca.Union(cb).Count;
-        return (jaccard, Math.Min(ca.Count, cb.Count));
+        if (!ctx.ProposalsByAgent.TryGetValue(a, out var pa) || !ctx.ProposalsByAgent.TryGetValue(b, out var pb))
+            return (0, 0);
+        if (pa.Count == 0 || pb.Count == 0) return (0, 0);
+
+        var union = pa.Keys.Union(pb.Keys).ToList();
+        double overlap = pa.Keys.Intersect(pb.Keys).Count() / (double)union.Count;
+
+        // 信心向量的一致度：沒提到的主張視為 0。L1 距離除以 2 就是 [0,1] 的差異量
+        //（兩個正規化分布的最大 L1 距離是 2）。
+        var na = Normalize(pa, union);
+        var nb = Normalize(pb, union);
+        double l1 = union.Sum(k => Math.Abs(na[k] - nb[k]));
+        double agreement = 1 - Math.Clamp(l1 / 2.0, 0, 1);
+
+        return (overlap * agreement, Math.Min(pa.Count, pb.Count));
+    }
+
+    private static Dictionary<string, double> Normalize(ImmutableDictionary<string, double> p, List<string> union)
+    {
+        double z = union.Sum(k => p.GetValueOrDefault(k, 0));
+        return union.ToDictionary(k => k, k => z <= 0 ? 0 : p.GetValueOrDefault(k, 0) / z);
     }
 }
 
@@ -114,12 +144,17 @@ public sealed class BlendedCorrelation : ICorrelationEstimator
         var lineage = s.Roles.GroupBy(r => r.AgentId)
             .ToImmutableDictionary(g => g.Key, g => new AgentLineage(g.First().Vendor, g.First().Family, "-"));
 
-        var byAgent = ImmutableDictionary.CreateBuilder<string, ImmutableHashSet<string>>();
+        // 帶著各自的信心：只記「提了哪些」會讓排序相反的兩個人看起來一模一樣
+        var byAgent = new Dictionary<string, Dictionary<string, double>>(StringComparer.Ordinal);
         foreach (var claim in s.Claims.Where(c => c.Kind == ClaimKind.Hypothesis))
             foreach (var p in claim.Proposals)
-                byAgent[p.AgentId] = byAgent.GetValueOrDefault(p.AgentId, ImmutableHashSet<string>.Empty).Add(claim.Key.Value);
+            {
+                if (!byAgent.TryGetValue(p.AgentId, out var m)) byAgent[p.AgentId] = m = new(StringComparer.Ordinal);
+                m[claim.Key.Value] = Math.Max(m.GetValueOrDefault(claim.Key.Value, 0), p.Probability);
+            }
 
-        return new CorrelationContext(lineage, byAgent.ToImmutable(), policy);
+        return new CorrelationContext(lineage,
+            byAgent.ToImmutableDictionary(kv => kv.Key, kv => kv.Value.ToImmutableDictionary()), policy);
     }
 }
 

@@ -188,7 +188,7 @@ public class CalibrationAndCorrelationTests
                 .Add("b", new AgentLineage("vendor-x", "x-large", "g2"))
                 .Add("c", new AgentLineage("vendor-x", "x-small", "g1"))
                 .Add("d", new AgentLineage("vendor-y", "y-large", "g1")),
-            ImmutableDictionary<string, ImmutableHashSet<string>>.Empty,
+            ImmutableDictionary<string, ImmutableDictionary<string, double>>.Empty,
             PolicySnapshot.Initial);
 
         var e = new LineagePriorEstimator();
@@ -209,9 +209,9 @@ public class CalibrationAndCorrelationTests
         var lineage = ImmutableDictionary<string, AgentLineage>.Empty
             .Add("a", new AgentLineage("vendor-x", "x-large", "g1"))
             .Add("b", new AgentLineage("vendor-y", "y-large", "g1"));      // 不同 family → 先驗較低
-        var same = ImmutableHashSet.Create("K1", "K2");
+        var same = ImmutableDictionary<string, double>.Empty.Add("K1", 0.9).Add("K2", 0.2);
         var ctx = new CorrelationContext(lineage,
-            ImmutableDictionary<string, ImmutableHashSet<string>>.Empty.Add("a", same).Add("b", same),
+            ImmutableDictionary<string, ImmutableDictionary<string, double>>.Empty.Add("a", same).Add("b", same),
             PolicySnapshot.Initial);
 
         var blended = new BlendedCorrelation();

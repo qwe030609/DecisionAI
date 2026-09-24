@@ -146,12 +146,19 @@ public sealed class RoleAssigner : IRoleAssigner
                 return (agent: a, score: s);
             }).OrderByDescending(x => x.score).ThenBy(x => x.agent.Spec.AgentId, StringComparer.Ordinal).ToList();
 
-            // 固定強制輪換：即使有人長期領先，也要保留探索
+            // 固定強制輪換：即使有人長期領先，也要保留探索。
+            // 輪換對象刻意挑「被量得最少的那個」而不是隨機挑：隨機挑的話，
+            // 候選一多，最少被用到的那個仍然會餓著——而它正是最需要被量的那個，
+            // 因為它的後驗最寬，系統對它的判斷最沒有根據。
             int idx = 0;
             if (!separated && scored.Count > 1 && rng.NextDouble() < ForcedRotation)
             {
-                idx = 1 + rng.Next(scored.Count - 1);
-                why.Add($"{role}：強制輪換（{ForcedRotation:P0}）→ 改用 {scored[idx].agent.Spec.AgentId}");
+                idx = scored.Select((x, i) => (i, n: policy.Weight(x.agent.Spec.AgentId, domain, role).N))
+                            .Skip(1)
+                            .OrderBy(x => x.n).ThenBy(x => scored[x.i].agent.Spec.AgentId, StringComparer.Ordinal)
+                            .First().i;
+                why.Add($"{role}：強制輪換（{ForcedRotation:P0}）→ 改用最少被量過的 {scored[idx].agent.Spec.AgentId}" +
+                        $"（n={policy.Weight(scored[idx].agent.Spec.AgentId, domain, role).N}）");
             }
 
             chosen.Add(scored[idx].agent);

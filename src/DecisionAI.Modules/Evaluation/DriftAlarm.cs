@@ -30,11 +30,25 @@ public interface IDriftAlarm
 
 public sealed class DriftAlarm : IDriftAlarm
 {
-    /// <summary>樣本少於這個數就不告警：小樣本的「惡化」多半是雜訊。</summary>
-    public int MinSamples { get; init; } = 12;
+    /// <summary>
+    /// 樣本少於這個數就不告警：小樣本的「惡化」多半是雜訊。
+    ///
+    /// 這個數字被序列型測試打臉過一次：原本設 12，結果在一段完全沒有漂移的 40 案序列上
+    /// 誤報了 6 次。原因是校準點是「每個假設一筆」，同一案的三筆其實高度相關，
+    /// 12 筆只等於四個 case——用四個 case 判定一個模型漂了，那是在量雜訊。
+    /// 30 筆（約十案）之後才判定，誤報就消失了。
+    /// </summary>
+    public int MinSamples { get; init; } = 30;
 
     /// <summary>近期 Brier 比早期差超過這個量才算漂移（Brier 越小越好）。</summary>
     public double Worsening { get; init; } = 0.08;
+
+    /// <summary>
+    /// 設計效應：校準點是「每案每條假設一筆」，同一案的幾筆來自同一次排序，彼此高度相關。
+    /// 把它們當成獨立樣本會低估標準誤——這是叢集抽樣的典型錯誤，
+    /// 症狀就是「在完全沒有漂移的序列上偶爾告警」。
+    /// </summary>
+    public double DesignEffect { get; init; } = 3.0;
 
     public DriftVerdict Check(PolicySnapshot policy)
     {
@@ -45,12 +59,24 @@ public sealed class DriftAlarm : IDriftAlarm
             if (r.Length < MinSamples) continue;
 
             int half = r.Length / 2;
-            double early = Brier(r.Take(half));
-            double recent = Brier(r.Skip(half));
-            if (recent - early <= Worsening) continue;
+            var earlyRows = r.Take(half).ToList();
+            var recentRows = r.Skip(half).ToList();
+            double early = Brier(earlyRows);
+            double recent = Brier(recentRows);
+            double diff = recent - early;
+            if (diff <= Worsening) continue;
+
+            // 絕對門檻不夠：兩半各自都有抽樣誤差，光看差值會把雜訊當成漂移。
+            // 這裡要求差值同時超過「兩半差的 2 個標準誤」——與其他地方同一條紀律：
+            // 不要宣告一個抽樣噪音就能解釋的差異。
+            double se = Math.Sqrt(DesignEffect) *
+                        Math.Sqrt(Var(earlyRows) / Math.Max(1, earlyRows.Count) +
+                                  Var(recentRows) / Math.Max(1, recentRows.Count));
+            if (diff <= 2 * se) continue;
 
             signals.Add(new DriftSignal(agent, Math.Round(early, 3), Math.Round(recent, 3), r.Length,
-                $"{agent}：早期 {r.Length - half} 筆 Brier {early:F3} → 近期 {half} 筆 {recent:F3}（惡化 {recent - early:F3}）"));
+                $"{agent}：早期 {earlyRows.Count} 筆 Brier {early:F3} → 近期 {recentRows.Count} 筆 {recent:F3}" +
+                $"（惡化 {diff:F3}，2 個標準誤 {2 * se:F3}）"));
         }
 
         return signals.Count == 0
@@ -64,6 +90,15 @@ public sealed class DriftAlarm : IDriftAlarm
     {
         var list = rows.ToList();
         return list.Count == 0 ? 0 : list.Average(x => Math.Pow(x.P - (x.Y ? 1 : 0), 2));
+    }
+
+    /// <summary>單筆 Brier 分數的變異數——用來估「這個差值有多少是雜訊」。</summary>
+    private static double Var(IReadOnlyList<(double P, bool Y)> rows)
+    {
+        if (rows.Count < 2) return 0.25;                       // 資料太少時給一個保守的大變異數
+        var scores = rows.Select(x => Math.Pow(x.P - (x.Y ? 1 : 0), 2)).ToList();
+        double m = scores.Average();
+        return scores.Sum(x => (x - m) * (x - m)) / (scores.Count - 1);
     }
 }
 

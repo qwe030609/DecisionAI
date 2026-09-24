@@ -36,6 +36,8 @@ public sealed record TestSystemOptions
     public IVerifiabilityTriage? Triage { get; init; }
     public IToolModelRouter? ToolRouter { get; init; }
     public IRoleAssigner? RoleAssigner { get; init; }
+    /// <summary>mutation switch：Thompson 改回 argmax mean（要有 registry 才能建，所以用旗標）。</summary>
+    public bool ArgmaxAssigner { get; init; }
     public bool IgnoreDegradation { get; init; }          // mutation switch：永遠宣稱完整獨立性
     public IAbstentionGate? Gate { get; init; }
     public IAssuranceService? Assurance { get; init; }
@@ -88,6 +90,8 @@ public sealed class TestSystem
     public required IExperimentCatalog ExperimentCatalog { get; init; }
     public required IConformalSampleStore ConformalStore { get; init; }
     public required IAutomationBiasMonitor Oversight { get; init; }
+    /// <summary>序列型量測要看「系統實際用的那一個」，不是自己再 new 一個。</summary>
+    public required ICalibrator Calibrator { get; init; }
 
     public int LlmCallCount => Llms.OfType<ScriptedLlm>().Sum(l => l.Calls.Count);
     public IEnumerable<LlmRequest> LlmCalls => Llms.OfType<ScriptedLlm>().SelectMany(l => l.Calls);
@@ -123,7 +127,8 @@ public sealed class TestSystem
         var elicitor = new LikertLikelihoodElicitor();
 
         // 集成器帶校準與相關性折扣：多個同 family 的 agent 講同一句話，不該算成多個獨立證據
-        var ensembler = new CalibratedEnsembler(o.Calibrator, o.Correlation ?? new BlendedCorrelation());
+        var calibrator = o.Calibrator ?? new CalibrationEngine();
+        var ensembler = new CalibratedEnsembler(calibrator, o.Correlation ?? new BlendedCorrelation());
         var bayes = new TemperedBayesUpdater();
         var decision = new DecisionEngine();
         var experimentCatalog = o.ExperimentCatalog ?? new InMemoryExperimentCatalog();
@@ -166,13 +171,15 @@ public sealed class TestSystem
         {
             Orchestrator = orchestrator, Registry = registry, PolicyStore = policy, ClaimCatalog = claimCatalog,
             Engine = engine, Permission = permission, Clock = clock, World = world, Llms = llms, Human = human,
-            ExperimentCatalog = experimentCatalog, ConformalStore = conformalStore, Oversight = oversight
+            ExperimentCatalog = experimentCatalog, ConformalStore = conformalStore, Oversight = oversight,
+            Calibrator = calibrator
         };
     }
 
     private static IRoleAssigner WrapAssigner(TestSystemOptions o, AgentRegistry registry)
     {
-        var inner = o.RoleAssigner ?? new RoleAssigner(registry);
+        var inner = o.RoleAssigner ?? (o.ArgmaxAssigner
+            ? new ArgmaxMeanAssigner(registry) : (IRoleAssigner)new RoleAssigner(registry));
         return o.IgnoreDegradation ? new IgnoreDegradationAssigner(inner) : inner;
     }
 }
