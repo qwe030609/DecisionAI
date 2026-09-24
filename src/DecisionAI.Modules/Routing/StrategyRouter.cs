@@ -1,12 +1,14 @@
 // ============================================================================
 //  Routing 第三段：策略規則表（有序）。新策略 = 加一條 IStrategyRule + 一份 workflow JSON。
 //  Rev2：策略必須知道自己有幾雙獨立的眼睛——IndependenceBudget 不足時禁用依賴獨立性的策略。
+//  Phase 3：策略還要知道「學習訊號最近是不是變歪了」——校準漂移時強制人類核准。
 // ============================================================================
 
 using System.Collections.Immutable;
 using DecisionAI.Core.Domain;
 using DecisionAI.Core.Policy;
 using DecisionAI.Modules.Agents;
+using DecisionAI.Modules.Evaluation;
 
 namespace DecisionAI.Modules.Routing;
 
@@ -48,11 +50,13 @@ public sealed class StrategyRouter : IStrategyRouter
 {
     private readonly IReadOnlyList<IStrategyRule> _rules;
     private readonly IAgentRegistry _registry;
+    private readonly IDriftAlarm _drift;
 
-    public StrategyRouter(IAgentRegistry registry, IReadOnlyList<IStrategyRule>? rules = null)
+    public StrategyRouter(IAgentRegistry registry, IReadOnlyList<IStrategyRule>? rules = null, IDriftAlarm? drift = null)
     {
         _registry = registry;
         _rules = rules ?? new IStrategyRule[] { new PipelineRule(), new VerifiedSolverRule() };
+        _drift = drift ?? new DriftAlarm();
     }
 
     public WorkflowPlan Plan(ProblemFacts f, PolicySnapshot policy, IndependenceBudget budget, DegradationLevel degradation)
@@ -66,7 +70,12 @@ public sealed class StrategyRouter : IStrategyRouter
         int solverCount = choice.Strategy == Strategy.SingleAgent ? 1 : (f.Risk == RiskLevel.High ? 3 : 2);
         solverCount = Degradation.CapSolvers(degradation, solverCount);
 
-        if (solverCount > 1)
+        // ★ Phase 3：先看學習訊號本身可不可信。漂移中就不該再用歷史去省 solver——
+        //   那等於拿一把最近才被摔過的尺去量東西。
+        var drift = _drift.Check(policy);
+        if (drift.Any) why.Add(drift.Detail);
+
+        if (solverCount > 1 && !drift.Any)
         {
             var top = _registry.Select(new SelectionQuery("solver", f.Domain, 1), policy).FirstOrDefault();
             if (top is not null)
@@ -76,6 +85,8 @@ public sealed class StrategyRouter : IStrategyRouter
                 else why.Add($"歷史資料不足（最佳 solver n={w.N}）→ 維持 {solverCount} 個 solver");
             }
         }
+        else if (solverCount > 1)
+            why.Add("校準漂移中 → 不依歷史減少 solver（漂移時歷史就是不可信的那個東西）");
 
         // ★ Rev2 §4.4 第一步：有 L3 機器驗證器時，L1 critic 的邊際價值極低——機器已經判過了。
         //   只有在「高風險」且「獨立性預算允許」時才值得再花一次批判。
@@ -89,7 +100,8 @@ public sealed class StrategyRouter : IStrategyRouter
         string wfName = choice.Strategy == Strategy.SolverCriticVerifier && !includeCritic
             ? "engineering_root_cause_nocritic" : choice.WorkflowName;
 
-        bool requireHuman = f.Risk != RiskLevel.Low || f.BestAvailableVerifier <= VerifierLevel.L2_Rule;
+        bool requireHuman = f.Risk != RiskLevel.Low || f.BestAvailableVerifier <= VerifierLevel.L2_Rule || drift.Any;
+        if (drift.Any && f.Risk == RiskLevel.Low) why.Add("校準漂移 → 即使低風險也要求人類核准");
         return new WorkflowPlan(choice.Strategy, wfName, solverCount, includeCritic, requireHuman, degradation, why.ToImmutable());
     }
 }

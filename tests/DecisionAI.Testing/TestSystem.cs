@@ -55,6 +55,12 @@ public sealed record TestSystemOptions
     public IDiversityMonitor? DiversityMonitor { get; init; }
     public IPresentationPolicy? Presentation { get; init; }
     public IExperimentCatalog? ExperimentCatalog { get; init; }
+
+    // ── Phase 3：學習與稽核 ──
+    public IConformalSampleStore? ConformalStore { get; init; }
+    public IDriftAlarm? Drift { get; init; }
+    public IAutomationBiasMonitor? Oversight { get; init; }
+    public IPolicyStore? PolicyStore { get; init; }
     public Func<CaseState, IInjectionGuard, string>? CriticContext { get; init; }   // MR-17：餵原始輸出必須被擋
 
     public IReadOnlyDictionary<string, WorkflowDefinition>? Catalog { get; init; }
@@ -80,6 +86,8 @@ public sealed class TestSystem
     public required IReadOnlyList<ILlm> Llms { get; init; }
     public required IHumanGateway Human { get; init; }
     public required IExperimentCatalog ExperimentCatalog { get; init; }
+    public required IConformalSampleStore ConformalStore { get; init; }
+    public required IAutomationBiasMonitor Oversight { get; init; }
 
     public int LlmCallCount => Llms.OfType<ScriptedLlm>().Sum(l => l.Calls.Count);
     public IEnumerable<LlmRequest> LlmCalls => Llms.OfType<ScriptedLlm>().SelectMany(l => l.Calls);
@@ -89,7 +97,7 @@ public sealed class TestSystem
         o ??= new TestSystemOptions();
         var clock = new FixedClock();
         var rng = new DecisionAI.Adapters.Runtime.SeededRandomSource(o.Seed);
-        var policy = new InMemoryPolicyStore();
+        var policy = o.PolicyStore ?? new InMemoryPolicyStore();
         var claimCatalog = o.ClaimCatalog ?? AtsScenario.SeededCatalog();
         var permission = o.Permission ?? new RolePermissionMatrix();
         var evidence = new InMemoryEvidenceStore(clock);
@@ -119,6 +127,8 @@ public sealed class TestSystem
         var bayes = new TemperedBayesUpdater();
         var decision = new DecisionEngine();
         var experimentCatalog = o.ExperimentCatalog ?? new InMemoryExperimentCatalog();
+        var conformalStore = o.ConformalStore ?? new InMemoryConformalSampleStore();
+        var oversight = o.Oversight ?? new AutomationBiasMonitor();
 
         var kit = new Phase2Kit
         {
@@ -129,7 +139,8 @@ public sealed class TestSystem
             Conformal         = o.Conformal ?? new ConformalCalibrator(),
             Diversity         = o.DiversityMonitor ?? new DiversityMonitor(),
             Presentation      = o.Presentation ?? new PresentationPolicy(),
-            ExperimentCatalog = experimentCatalog
+            ExperimentCatalog = experimentCatalog,
+            Oversight         = oversight
         };
 
         var engine = new WorkflowEngine();
@@ -146,16 +157,16 @@ public sealed class TestSystem
             o.Triage ?? new VerifiabilityTriage(),
             o.ToolRouter ?? new ToolModelRouter(),
             WrapAssigner(o, registry),
-            new StrategyRouter(registry), engine,
+            new StrategyRouter(registry, null, o.Drift), engine,
             o.Assurance ?? new AssuranceService(o.Gate ?? new AbstentionGate()),
             new EvaluationService(), new CatalogWriter(claimCatalog), payloads,
-            o.Catalog ?? WorkflowCatalog.Default(), rng);
+            o.Catalog ?? WorkflowCatalog.Default(), rng, experimentCatalog, conformalStore);
 
         return new TestSystem
         {
             Orchestrator = orchestrator, Registry = registry, PolicyStore = policy, ClaimCatalog = claimCatalog,
             Engine = engine, Permission = permission, Clock = clock, World = world, Llms = llms, Human = human,
-            ExperimentCatalog = experimentCatalog
+            ExperimentCatalog = experimentCatalog, ConformalStore = conformalStore, Oversight = oversight
         };
     }
 

@@ -25,6 +25,7 @@ using DecisionAI.Modules.Assurance;
 using DecisionAI.Modules.Catalog;
 using DecisionAI.Modules.Decision;
 using DecisionAI.Modules.Diversity;
+using DecisionAI.Modules.Evaluation;
 using DecisionAI.Modules.Humans;
 using DecisionAI.Modules.Probability;
 using DecisionAI.Modules.Verification;
@@ -46,6 +47,9 @@ public sealed record Phase2Kit
     public IDiversityMonitor Diversity { get; init; } = new DiversityMonitor();
     public IPresentationPolicy Presentation { get; init; } = new PresentationPolicy();
     public IExperimentCatalog ExperimentCatalog { get; init; } = new InMemoryExperimentCatalog();
+
+    /// <summary>Phase 3：跨案的人類決策監控。預設會監控，但不會在資料不足時做任何判定。</summary>
+    public IAutomationBiasMonitor Oversight { get; init; } = new AutomationBiasMonitor();
 }
 
 public sealed class StandardHandlers
@@ -392,11 +396,46 @@ public sealed class StandardHandlers
         {
             SystemRecommendation = s.Decision?.RecommendedAction
         };
-        var verdict = await _human.RequestAsync(_kit.Presentation.Shape(raw, HumanRole.Approver), ct);
-        var events = new List<CaseEvent>
+
+        // Phase 3：跨案監控若判定流程已橡皮圖章化，就在這裡收緊，而不是寫一份提醒大家認真看的文件
+        var oversight = _kit.Oversight.PolicyFor(HumanRole.Approver);
+        var shaped = _kit.Presentation.Shape(raw, HumanRole.Approver);
+        var events = new List<CaseEvent>();
+        if (oversight.Tightened)
         {
-            new HumanActed(HumanRole.Approver.ToString(), what, verdict.Approved, verdict.Rationale).By(step.Id, "approver", Actors.Human)
-        };
+            foreach (var r in oversight.Reasons) events.Add(Sys(step.Id, new Noted($"automation bias 監控：{r}")));
+            if (oversight.RequireBlindFirstPass)
+                shaped = shaped with { SystemRecommendation = null, RecommendationRevealed = false };
+        }
+
+        var verdict = await _human.RequestAsync(shaped, ct);
+        _kit.Oversight.Record(new HumanDecision(s.Id, HumanRole.Approver, "approver", verdict.Approved,
+                                                verdict.Seconds, shaped.RecommendationRevealed));
+        events.Add(new HumanActed(HumanRole.Approver.ToString(), what, verdict.Approved, verdict.Rationale)
+        {
+            Seconds = verdict.Seconds,
+            SawRecommendationFirst = shaped.RecommendationRevealed
+        }.By(step.Id, "approver", Actors.Human));
+
+        // 第二位核准者：接受率逼近 100% 又快到不可能讀完證據時，一個簽名不構成監督
+        if (verdict.Approved && oversight.RequireSecondApprover)
+        {
+            var second = await _human.RequestAsync(
+                shaped with { What = what + "（第二位核准者：第一位的接受率與決策時間已觸發監控）" }, ct);
+            _kit.Oversight.Record(new HumanDecision(s.Id, HumanRole.Approver, "approver-2", second.Approved,
+                                                    second.Seconds, shaped.RecommendationRevealed));
+            events.Add(new HumanActed(HumanRole.Approver.ToString(), what + "（第二位）", second.Approved, second.Rationale)
+            {
+                Seconds = second.Seconds,
+                SawRecommendationFirst = shaped.RecommendationRevealed
+            }.By(step.Id, "approver-2", Actors.Human));
+            if (!second.Approved)
+            {
+                events.Add(Sys(step.Id, new Halted($"第二位核准者拒絕：{what}", ImmutableArray<string>.Empty)));
+                return events;
+            }
+        }
+
         if (!verdict.Approved) events.Add(Sys(step.Id, new Halted($"人類拒絕：{what}", ImmutableArray<string>.Empty)));
         return events;
     }

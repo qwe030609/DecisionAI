@@ -47,18 +47,23 @@ public sealed class CaseOrchestrator
     private readonly PayloadBuilder _payloads;
     private readonly IReadOnlyDictionary<string, WorkflowDefinition> _workflows;
     private readonly IRandomSource _rng;
+    private readonly IExperimentCatalog _experiments;
+    private readonly IConformalSampleStore _conformal;
 
     public CaseOrchestrator(IPolicyStore policy, IClaimCatalog catalog, IRolePermission permission, IClock clock,
                             IEvidenceStore evidence, VerifierRegistry verifiers, IVerifiabilityTriage triage,
                             IToolModelRouter tools, IRoleAssigner roles, IStrategyRouter strategy, IWorkflowEngine engine,
                             IAssuranceService assurance, IEvaluationService evaluation, CatalogWriter catalogWriter,
                             PayloadBuilder payloads, IReadOnlyDictionary<string, WorkflowDefinition> workflows,
-                            IRandomSource rng)
+                            IRandomSource rng, IExperimentCatalog? experiments = null,
+                            IConformalSampleStore? conformal = null)
     {
         _policy = policy; _catalog = catalog; _permission = permission; _clock = clock; _evidence = evidence;
         _verifiers = verifiers; _triage = triage; _tools = tools; _roles = roles; _strategy = strategy;
         _engine = engine; _assurance = assurance; _evaluation = evaluation; _catalogWriter = catalogWriter;
         _payloads = payloads; _workflows = workflows; _rng = rng;
+        _experiments = experiments ?? new InMemoryExperimentCatalog();
+        _conformal = conformal ?? new InMemoryConformalSampleStore();
     }
 
     public async Task<CaseRun> RunAsync(string caseId, DecisionRequest req, IReadOnlyList<EvidenceDraft> evidence,
@@ -152,15 +157,40 @@ public sealed class CaseOrchestrator
         return new CaseRun(j, report);
     }
 
-    /// <summary>⑧ 真實結果回填 → Evaluation → PolicyDelta + CatalogDelta → Commit。進行中的 case 不受影響。</summary>
+    /// <summary>
+    /// ⑧ 真實結果回填 → Evaluation → PolicyDelta + CatalogDelta → Commit。進行中的 case 不受影響。
+    ///
+    /// Phase 3 在這裡多做三件跨案的事，都是「數出來」而不是「估出來」的：
+    ///   · 實驗歷史頻率進 ExperimentCatalog（下次同一個實驗就不必再靠定性估計）
+    ///   · conformal 樣本進樣本庫，並重建分位數（校準集算門檻，稽核集量覆蓋率）
+    ///   · 兩者的版本號一併寫進 PolicySnapshot，讓下一個 case pin 得到
+    /// </summary>
     public PolicySnapshot RecordOutcome(ICaseJournal j, Outcome outcome)
     {
         j.ApplyOrThrow(new OutcomeRecorded(outcome).By("outcome", "evaluation", Actors.Evaluation));
-        var delta = _evaluation.Ingest(outcome, j.State);
+        var (delta, harvest) = _evaluation.Ingest(outcome, j.State);
         foreach (var n in delta.Notes) j.ApplyOrThrow(new Noted(n).By("outcome", "evaluation", Actors.Evaluation));
         foreach (var c in delta.CatalogEntries)
             j.ApplyOrThrow(new CatalogEntryProposed(c.DraftId, c.Frame, c.Domain).By("outcome", "evaluation", Actors.Evaluation));
         _catalogWriter.Commit(delta);
-        return _policy.Commit(delta with { CatalogVersionAfter = _catalog.CurrentVersion });
+
+        foreach (var e in harvest.ExperimentObservations)
+            _experiments.Record(e.ExperimentKey, e.ClaimCatalogId, e.OutcomeIndex, e.OutcomeCount);
+        foreach (var c in harvest.ConformalSamples) _conformal.Add(c);
+
+        var quantiles = _conformal.RebuildAll();
+        foreach (var q in quantiles.OrderBy(k => k.Key, StringComparer.Ordinal))
+            j.ApplyOrThrow(new Noted(
+                $"conformal（{q.Key}）：校準 {q.Value.CalibrationSize} 筆 → 門檻 {q.Value.Threshold:F3}；" +
+                $"稽核 {q.Value.AuditSize} 筆實測覆蓋率 " +
+                $"{(q.Value.AuditSize == 0 ? "尚無" : _conformal.EmpiricalCoverage(q.Key, q.Value).ToString("P0"))}" +
+                $"（目標 {1 - q.Value.Alpha:P0}）").By("outcome", "evaluation", Actors.Evaluation));
+
+        return _policy.Commit(delta with
+        {
+            CatalogVersionAfter = _catalog.CurrentVersion,
+            ConformalUpdates = quantiles,
+            ExperimentCatalogVersionAfter = _experiments.CurrentVersion
+        });
     }
 }

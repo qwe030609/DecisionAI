@@ -79,7 +79,12 @@ public sealed record CoveragePredicted(string TaskFamily, double TargetCoverage,
 public sealed record DiversityAssessed(bool Collapsed, ImmutableArray<string> FailedMetrics, string Detail) : CaseEvent;
 public sealed record BeliefUpdated(ImmutableDictionary<string, double> Posterior, string Cause) : CaseEvent;
 public sealed record DecisionMade(DecisionResult Result) : CaseEvent;
-public sealed record HumanActed(string HumanRole, string What, bool Approved, string Rationale) : CaseEvent;
+public sealed record HumanActed(string HumanRole, string What, bool Approved, string Rationale) : CaseEvent
+{
+    /// <summary>Phase 3：automation bias 的兩個可量測訊號，寫進事件流才能跨案稽核。</summary>
+    public double? Seconds { get; init; }
+    public bool SawRecommendationFirst { get; init; }
+}
 
 // ── Workflow 控制 ──
 public sealed record StepCompleted(string Status) : CaseEvent;                    // ok / ok(retry n) / partial / failed

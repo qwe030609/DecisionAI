@@ -121,7 +121,8 @@ public static class CaseReducer
         VerificationRecorded v => ApplyVerification(s, v.Result),
         BeliefUpdated b        => s with { Beliefs = b.Posterior, Log = s.Log.Add($"[{e.StepId}] {b.Cause}") },
         DecisionMade d         => s with { Decision = d.Result },
-        HumanActed h           => s with { Log = s.Log.Add($"[{e.StepId}] 人類（{h.HumanRole}）「{h.What}」→ {(h.Approved ? "同意" : "拒絕")}：{h.Rationale}") },
+        HumanActed h           => s with { Log = s.Log.Add($"[{e.StepId}] 人類（{h.HumanRole}）「{h.What}」→ {(h.Approved ? "同意" : "拒絕")}：{h.Rationale}" +
+                                               (h.Seconds is { } sec ? $"（{sec:F1} 秒{(h.SawRecommendationFirst ? "、先看到系統建議" : "")}）" : "")) },
 
         StepCompleted sc       => s with { StepStatus = s.StepStatus.SetItem(e.StepId, sc.Status) },
         PartialResult pr       => s with { PartialSteps = s.PartialSteps.Add(e.StepId), Log = s.Log.Add($"[{e.StepId}] 部分結果：{pr.Note}") },

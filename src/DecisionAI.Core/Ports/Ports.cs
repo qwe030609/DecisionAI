@@ -73,6 +73,12 @@ public sealed record HumanVerdict(bool Approved, string Rationale)
 {
     /// <summary>盲評時選了哪一個候選（索引）。</summary>
     public int? ChosenOption { get; init; }
+
+    /// <summary>
+    /// 這個人花了多久。只有 gateway 知道，所以由它回報——
+    /// 沒有這個欄位就量不出橡皮圖章化，而「有人核准」本身不構成監督。
+    /// </summary>
+    public double? Seconds { get; init; }
 }
 
 public interface IHumanGateway
