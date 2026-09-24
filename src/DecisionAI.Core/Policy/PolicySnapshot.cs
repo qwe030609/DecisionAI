@@ -85,8 +85,9 @@ public sealed record CalibrationCurve(ImmutableArray<(double P, bool Y)> Records
     }
 
     /// <summary>
-    /// 收縮係數：樣本 &lt; 5 一律打七折（沒證明自己之前不信）；
+    /// 整體收縮係數：樣本 &lt; 5 一律打七折（沒證明自己之前不信）；
     /// 之後依「自報 − 實際」的過度自信程度決定（Platt scaling 的一維簡化版）。
+    /// 注意它是「所有機率值平均起來」的過度自信——Phase 3 的 Bucket 才是分桶的那個。
     /// </summary>
     public double ShrinkFactor
     {
@@ -99,6 +100,20 @@ public sealed record CalibrationCurve(ImmutableArray<(double P, bool Y)> Records
     }
 
     public CalibrationCurve Add(double p, bool y) => new(Records.Add((Math.Clamp(p, 0.01, 0.99), y)));
+
+    /// <summary>
+    /// Phase 3：某個自報機率「附近」的實際命中率。
+    ///
+    /// 全域的 ECE 會把不同機率值的誤差平均掉：一個 agent 可能在 0.5 那一帶很準、
+    /// 在 0.9 那一帶嚴重灌水，平均起來看起來只是「稍微樂觀」。真正要修的是後者，
+    /// 而要修它就得看它自己那一桶的資料。這是 Platt / isotonic 的核心，
+    /// 只是這裡用最樸素的鄰域平均——樣本少的時候，複雜的擬合只會擬合到雜訊。
+    /// </summary>
+    public (double Rate, int N)? Bucket(double p, double halfWidth = 0.1)
+    {
+        var rows = Records.Where(r => Math.Abs(r.P - p) <= halfWidth).ToList();
+        return rows.Count == 0 ? null : (rows.Count(r => r.Y) / (double)rows.Count, rows.Count);
+    }
 }
 
 /// <summary>錯誤相關矩陣：phi 係數 + 共同案例數。共同案例少於 3 → 視為無資訊。</summary>

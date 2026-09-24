@@ -21,14 +21,34 @@ public interface ICalibrator
 }
 
 /// <summary>
-/// 把自報機率往 0.5 收縮。樣本 &lt; 5 → 一律打七折（沒證明自己之前不信）；
-/// 之後依「自報 − 實際」的過度自信程度決定收縮係數（Platt scaling 的一維簡化版）。
+/// 兩段式回校：
+///   · 這個自報機率「那一桶」有足夠樣本 → 往該桶的實際命中率拉（Platt / isotonic 的樸素版）
+///   · 樣本不足 → 退回整體收縮係數，往 0.5 收
+///
+/// 為什麼要分桶：全域的過度自信程度會把不同機率值的誤差平均掉。
+/// 一個每次都喊「幾乎確定」但只有六成對的 agent，如果他在低信心那一帶還算準，
+/// 全域平均就會顯示他「只是稍微樂觀」——然後他繼續用 0.9 主導後驗。
+/// 真正要修的是 0.9 那一桶，而要修它就得看那一桶自己的資料。
 /// </summary>
 public sealed class CalibrationEngine : ICalibrator
 {
+    /// <summary>桶內樣本達到這個數才採用桶內命中率；之前只能部分採用。</summary>
+    public int FullTrustAt { get; init; } = 20;
+
+    /// <summary>桶寬（±）。太窄會沒有樣本，太寬就退化成全域平均。</summary>
+    public double HalfWidth { get; init; } = 0.1;
+
     public double Recalibrate(string agentId, double p, PolicySnapshot policy)
     {
-        double k = policy.Curve(agentId).ShrinkFactor;
+        var curve = policy.Curve(agentId);
+        if (curve.Bucket(p, HalfWidth) is { } bucket && bucket.N >= 5)
+        {
+            // 桶內樣本越多，越相信桶內的實際命中率；樣本少時仍以自報值為主
+            double trust = Math.Min(1.0, bucket.N / (double)FullTrustAt);
+            return Math.Clamp(p + (bucket.Rate - p) * trust, 0.01, 0.99);
+        }
+
+        double k = curve.ShrinkFactor;
         return Math.Clamp(0.5 + (p - 0.5) * k, 0.01, 0.99);
     }
 }
