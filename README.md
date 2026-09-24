@@ -1,4 +1,4 @@
-# DecisionAI — 多 LLM 決策系統（Rev2 架構，Phase 2）
+# DecisionAI — 多 LLM 決策系統（Rev2 架構，Phase 3）
 
 > LLM 只負責「提出」；該不該信、該做什麼，全部由確定性程式碼計算。
 > 架構依據：`DecisionAI_Architecture_Rev2.md`（Modular Monolith，.NET 8）。
@@ -11,20 +11,25 @@ src/
   DecisionAI.Core/           零依賴：Domain、Journal（事件 + 投影）、Assurance、Policy、Ports
   DecisionAI.Modules/        Routing / Agents / Workflow / Evidence / Verification / Catalog /
                              Probability / Decision / Assurance / Diversity / Subtext / Humans /
-                             Evaluation / Journal（權限矩陣）
+                             Retrieval / Evaluation / Journal（權限矩陣）
   DecisionAI.Adapters/       AnthropicLlm、OpenAiCompatibleLlm、SystemClock、SeededRandomSource、LocalEmbedder
+  DecisionAI.Persistence/    Postgres 16 + pgvector：PolicyStore（存 delta）、ClaimCatalog、
+                             PgVectorIndex、實驗歷史、conformal 樣本、人類決策稽核
   DecisionAI.Orchestration/  CaseOrchestrator + StandardHandlers（Intake 邊界）
   DecisionAI.Host/           CLI 離線 demo（全部走 ScriptedLlm，不連網）
 tests/
   DecisionAI.Testing/        ScriptedLlm、FixedClock、ScriptedHumanGateway、AtsSimulator、TestSystem（組合根）
   DecisionAI.Tests/          golden（類別 1 / 2a / 2d / 4）、MR-1～19、Phase 2 守門件性質測試、
-                             timeout 與未註冊 step、權限矩陣、可重放、架構規則
+                             Phase 3 序列型學習（50 案）與持久化、timeout 與未註冊 step、
+                             權限矩陣、可重放、架構規則
 ```
 
 依賴方向：`Host → Orchestration → Modules → Core ← Adapters`；`Testing` 只依賴上面幾個。
 
 ```
-dotnet test                                    # Phase 2 完成門檻（106 項，含 MR-1～19）
+dotnet test                                    # 117 項（含 MR-1～19 與序列型學習）
+# 持久化測試需要 Postgres + pgvector，沒設連線字串就 Skip 而不是假裝通過：
+DECISIONAI_PG="Host=…;Username=…;Password=…;Database=decisionai" dotnet test
 dotnet run --project src/DecisionAI.Host       # 離線 demo（互動終端機會真的問你核准）
 dotnet run --project tools/DecisionAI.Benchmark -- out.json   # 32 案 benchmark + mutation 矩陣
 ```
@@ -69,6 +74,30 @@ Phase 2 新增的五項檢查刻意都是「獨立重算再比對」而不是「
 受影響的分母以 baseline 實際發生什麼為準：實驗被 EVOI 跳掉的案例就沒有敏感度分析可以造假，
 把它算進分母只會讓數字好看或難看，兩者都不誠實。
 
+### 序列型（Phase 3 的完成門檻）
+
+單案測不出學習：一個 case 的 Beta 後驗、一個 case 的校準曲線都沒有意義。
+序列套件連跑 50 案，每個 agent 有一個「真實能力」參數（系統不知道，要自己學回來），
+對錯由 `(agentId, caseId)` 的穩定雜湊決定，所以整串可重放。
+
+| 曲線 | baseline 結果 |
+|---|---|
+| Beta 後驗收斂 | hi 真實 85% → 學到 87%；twin 85% → 80%；loud 60% → 64% |
+| 校準修正 | loud 自評 90% → 校準後（依桶內樣本數縮放）往 60% 拉 |
+| 校準器有效性 | 套回各自歷史後 ECE 0.129 → 0.003、0.217 → 0.087 |
+| Catalog 命中率 | 前 10 案 50% → 後 10 案 100%，五種機制只長出五條條目 |
+| conformal | 校準 34 筆、稽核 16 筆，覆蓋率只用稽核集量 |
+| 後驗命中率 / Brier / ECE | 82% / 0.351 / 0.062 |
+| 漂移偵測 | 沒有漂移的序列零誤報；漂移序列 23 案在策略階段就標示並提高人類核准要求 |
+| 橡皮圖章偵測 | 40 案觸發監控並收緊呈現（接受率 100%、1.5 秒按下去） |
+
+另有兩個對照序列：**漂移**（最強的 agent 第 20 案後從 85% 掉到 25%）與
+**相關池**（一個 agent + 它的複製品 + 一個獨立的弱 agent）。
+
+序列型 mutation：S1 不回校、S3 argmax 取代 Thompson、S4 漂移告警沉默、S5 不監控人類決策
+全部被抓到；S2 相關性視為 0 在序列上不可觀察（ρ 一致時折扣等比例，加權平均會整個約掉），
+由單案的 Ensemble 檢查覆蓋。
+
 結果：32/32 通過金標；13 案拒答（11 案 Triage、2 案轉介專業數值模型）。
 Phase 2 的行為變化：7 案有實驗提名被 EVOI 判定為「無論出哪個結果推薦行動都一樣」而跳過，
 其中 2 案因此比 Phase 1 少登記實驗——那種實驗只是讓人心安，花的卻是真錢。
@@ -112,7 +141,23 @@ Phase 2 的行為變化：7 案有實驗提名被 EVOI 判定為「無論出哪�
 | `IPresentationPolicy`（伺服端）：證據與最壞情況先、系統建議後揭示 | `Modules/Humans/PresentationPolicy` |
 | `IEmbedder` 本地實作（hashing trick，不呼叫 LLM） | `Adapters/Runtime/LocalEmbedder` |
 
-## Phase 2 刻意不做（Phase 3）
+## Phase 3 新增的機制
 
-Evidence Allocator、`IDriftAlarm`、序列型測試（跨 case 記憶成長與 conformal 覆蓋率實測）、
-Postgres + pgvector、真模型錄製 / 重放比較。
+| 機制 | 位置 |
+|---|---|
+| 學習回路接完：校準點、錯誤相關觀察、conformal 樣本、實驗歷史頻率都真的被寫入 | `Modules/Evaluation/EvaluationService` |
+| 分桶校準（Platt / isotonic 的樸素版）：全域 ECE 會把不同機率值的誤差平均掉 | `Core/Policy`（`CalibrationCurve.Bucket`）+ `Probability/CalibrationEngine` |
+| `IDriftAlarm`：近期一半 vs 早期一半的 Brier，且要超過 2 個標準誤（含設計效應） | `Modules/Evaluation/DriftAlarm` |
+| `AutomationBiasMonitor`：接受率、決策時間、先看建議的比例 → 收緊流程 | `Modules/Evaluation/AutomationBias` |
+| `AccountabilityLedger`：第五個人類角色，從事件流投影 | `Modules/Humans/Accountability` |
+| Evidence Allocator：與 EVOI 同一條原則，用在取得證據 | `Modules/Evidence/EvidenceAllocator` |
+| `IVectorIndex` + 檢索輔助的 Canonicalizer（只縮小候選，不做判定） | `Modules/Retrieval` |
+| 強制輪換改挑「被量得最少的那個」：隨機挑會讓最弱的那個餓著 | `Modules/Agents/RoleAssigner` |
+| 即時相關性改看「集合重疊 × 信心向量一致度」 | `Modules/Probability/Correlation` |
+| Postgres + pgvector 持久化（實測通過） | `DecisionAI.Persistence` |
+
+## Phase 3 刻意不做（之後）
+
+真模型錄製 / 重放比較（目前全部是 ScriptedLlm）、跨領域的 Catalog 遷移、
+人類評分的實際介面（Subtext 的 `IRaterGateway` 只有腳本實作）、
+線上 A/B 與成本最佳化。
